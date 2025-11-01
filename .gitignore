@@ -1,0 +1,23 @@
+# Ignore all node_modules folders
+**/node_modules/
+
+
+
+# Ignore build outputs
+**/dist/
+**/build/
+
+# Ignore database + envs
+*.db
+.env
+.env.*
+
+# Logs and temp
+*.log
+logs/
+tmp/
+
+# Editor junk
+.DS_Store
+.vscode/
+.idea/
