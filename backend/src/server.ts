@@ -12,7 +12,8 @@ import registerBroadcast from './routes/broadcast'
 import registerTx from './routes/tx'
 import registerPoolCreate from './routes/poolCreate'
 import registerPoolList from './routes/poolList'
-
+import registerPoolBuy from './routes/poolBuy.js'
+import registerPoolState from './routes/poolState.js'
 // If you want thrown async errors to hit the error handler:
 
 
@@ -39,6 +40,8 @@ registerBroadcast(app)
 registerTx(app)
 registerPoolCreate(app)
 registerPoolList(app)
+registerPoolBuy(app)
+registerPoolState(app)
 
 // central error handler (will work with express-async-errors)
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

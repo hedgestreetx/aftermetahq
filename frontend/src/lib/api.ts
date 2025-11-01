@@ -75,3 +75,16 @@ export async function listPools(): Promise<{ ok: true; pools: Pool[] }>{
 export async function getPool(id: string): Promise<{ ok: true; pool: Pool }>{
   return j(`/api/pool/${encodeURIComponent(id)}`)
 }
+
+
+export async function poolBuy(id: string, body: { spendSats: number }) {
+  return j(`/api/pool/${encodeURIComponent(id)}/buy`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+}
+
+export async function poolState(id: string) {
+  return j(`/api/pool/${encodeURIComponent(id)}/state`)
+}
