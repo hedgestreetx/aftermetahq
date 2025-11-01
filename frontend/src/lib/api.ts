@@ -60,14 +60,20 @@ export type Pool = {
   createdAt: string
 }
 
-export async function createPool(input: { symbol: string; creator: string }): Promise<{ ok: true; pool: Pool }>{
+// frontend/src/lib/api.ts
+export async function createPool(input: {
+  symbol: string
+  creator: string
+  maxSupply?: number
+  decimals?: number
+  creatorReserve?: number
+}) {
   return j('/api/pool/create', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input)
   })
 }
-
 export async function listPools(): Promise<{ ok: true; pools: Pool[] }>{
   return j('/api/pool/list')
 }

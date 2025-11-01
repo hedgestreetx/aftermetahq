@@ -7,7 +7,12 @@ export interface Pool {
   poolAddress: string
   lockingScriptHex: string
   createdAt: string
+  maxSupply: number
+  decimals: number
+  mintedSupply: number
+  creatorReserve: number
 }
+
 
 export function registerPool(pool: Pool) {
   const stmt = db.prepare(
