@@ -1,81 +1,66 @@
-import React, { useEffect, useState } from 'react'
-import { getPool } from '@/lib/api'
-import MintButton from '@/components/MintButton'
+import { useEffect, useState } from "react";
+import { listPools, type Pool } from "@/lib/api";
 
-export default function PoolList() {
-  const [poolIds, setPoolIds] = useState<string[]>([])
-  const [pools, setPools] = useState<any[]>([])
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(true)
+export default function PoolList(props: { onSelect?: (p: Pool) => void }) {
+  const [rows, setRows] = useState<Pool[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  // STEP 1: fetch all pool IDs
-  useEffect(() => {
-    async function fetchPools() {
-      try {
-        const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3000'}/v1/pools`)
-        const data = await res.json()
-        if (data?.ok && Array.isArray(data.pools)) {
-          setPoolIds(data.pools.map((p: any) => p.id))
-        } else {
-          throw new Error('Unexpected pool list format')
-        }
-      } catch (e: any) {
-        setError(String(e?.message || e))
-      } finally {
-        setLoading(false)
-      }
+  async function load() {
+    setLoading(true);
+    setErr(null);
+    try {
+      const r = await listPools();
+      setRows(r.pools);
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setLoading(false);
     }
-    fetchPools()
-  }, [])
+  }
 
-  // STEP 2: fetch detailed data for each pool
-  useEffect(() => {
-    if (!poolIds.length) return
-    async function loadDetails() {
-      try {
-        const results = await Promise.all(poolIds.map((id) => getPool(id)))
-        setPools(results.map((r) => r.pool))
-      } catch (e: any) {
-        setError(String(e?.message || e))
-      }
-    }
-    loadDetails()
-  }, [poolIds])
-
-  // STEP 3: render states
-  if (loading) return <div>Loading pools…</div>
-  if (error) return <div style={{ color: 'red' }}>Error: {error}</div>
-  if (!pools.length) return <div>No pools found.</div>
+  useEffect(() => { load(); }, []);
 
   return (
-    <div style={{ marginTop: 24 }}>
-      <h3 style={{ marginBottom: 12 }}>Active Pools</h3>
-      {pools.map((p) => (
-        <div
-          key={p.id}
-          style={{
-            border: '1px solid #ccc',
-            borderRadius: 8,
-            padding: 12,
-            marginBottom: 12,
-            background: '#fafafa',
-          }}
-        >
-          <div>
-            <strong>{p.symbol}</strong> by {p.creator}
-          </div>
-
-          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>
-            {p.maxSupply.toLocaleString()} total supply · {p.decimals} decimals
-          </div>
-
-          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-            Pool Address: <code>{p.poolAddress}</code>
-          </div>
-
-          <MintButton pool={p} />
-        </div>
-      ))}
+    <div className="card">
+      <div className="h" style={{justifyContent:"space-between"}}>
+        <h3 className="h" style={{margin:0, gap:8}}>Pools <span className="badge">{rows.length}</span></h3>
+        <button onClick={load}>Refresh</button>
+      </div>
+      {err && <div className="small" style={{color:"#ff8b8b"}}>{err}</div>}
+      {loading ? <div className="small">Loading…</div> : (
+        <table className="table" style={{marginTop:8}}>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Pool ID</th>
+              <th>Minted</th>
+              <th>Creator</th>
+              <th>Dest</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(p => (
+              <tr key={p.id}>
+                <td><strong>{p.symbol}</strong></td>
+                <td><code>{p.id}</code></td>
+                <td>{p.supply?.mintedSupply ?? 0} / {p.maxSupply}</td>
+                <td className="small">{p.creator}</td>
+                <td className="small">
+                  {p.poolAddress ? <code>{p.poolAddress}</code> : <span>script:{p.lockingScriptHex.slice(0,12)}…</span>}
+                </td>
+                <td style={{textAlign:"right"}}>
+                  <button onClick={() => props.onSelect?.(p)}>Select</button>
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={6} className="small">No pools yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      )}
     </div>
-  )
+  );
 }

@@ -1,162 +1,142 @@
-import React, { useState } from 'react'
-import AdminStatus from '@/components/AdminStatus'
-import AdminPanel from '@/components/AdminPanel'
-import MintTokenForm from '@/components/MintTokenForm'
-import PoolViewer from '@/components/PoolViewer'
-import BuyBox from '@/components/BuyBox'
-import MintHistory from '@/components/MintHistory'
-import { useTxStatus } from './hooks/useTxStatus'
+import { useEffect, useState } from "react";
+import AdminStatus from "@/components/AdminStatus";
+import PoolList from "@/components/PoolList";
+import MintTokenForm from "@/components/MintTokenForm";
+import AdminPanel from "@/components/AdminPanel";
+import { health, listMints, type MintRow, type Pool } from "@/lib/api";
 
 export default function App() {
-  const [active, setActive] = useState<'admin'|'mint'|'pools'|'buy'>('admin')
-  const [currentPoolId, setCurrentPoolId] = useState<string>('')
-  const [currentTxid, setCurrentTxid] = useState<string>('') // track last tx we broadcast
+  const [svc, setSvc] = useState<string>("");   // backend service name
+  const [err, setErr] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Pool | null>(null);
+  const [mints, setMints] = useState<MintRow[]>([]);
 
-  // poll once per minute if we have a txid
-  const { data: tx, error: txErr } = useTxStatus(currentTxid || null, 60_000)
+  async function loadHealth() {
+    try {
+      const h = await health();
+      setSvc(h.service);
+      setErr(null);
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    }
+  }
 
-  const TabButton: React.FC<
-    React.ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean }
-  > = ({ active, children, ...props }) => (
-    <button
-      {...props}
-      style={{
-        padding: '8px 12px',
-        borderRadius: 8,
-        border: '1px solid #ddd',
-        background: active ? '#111' : '#fff',
-        color: active ? '#fff' : '#111',
-        cursor: props.disabled ? 'not-allowed' : 'pointer'
-      }}
-    >
-      {children}
-    </button>
-  )
+  async function loadMints() {
+    try {
+      const r = await listMints({ limit: 50 });
+      setMints(r.mints);
+    } catch (e) {
+      console.error("loadMints error:", e);
+    }
+  }
+
+  useEffect(() => {
+    loadHealth();
+    loadMints();
+    const id = setInterval(loadMints, 5000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
-    <div style={{ maxWidth: 960, margin: '32px auto', fontFamily: 'Inter, system-ui', padding: 16 }}>
-      <h1 style={{ fontSize: 26, fontWeight: 700, marginBottom: 12 }}>Aftermeta Dashboard</h1>
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        <TabButton active={active==='admin'} onClick={() => setActive('admin')}>Admin</TabButton>
-        <TabButton active={active==='mint'} onClick={() => setActive('mint')}>Mint Token</TabButton>
-        <TabButton active={active==='pools'} onClick={() => setActive('pools')}>Pools</TabButton>
-        <TabButton
-          active={active==='buy'}
-          onClick={() => setActive('buy')}
-          disabled={!currentPoolId}
-          title={currentPoolId ? '' : 'Select or create a pool first'}
-        >
-          Buy
-        </TabButton>
+    <div className="container">
+      {/* Header */}
+      <div className="h" style={{ justifyContent: "space-between", marginBottom: 16 }}>
+        <h2 className="h" style={{ gap: 10, margin: 0 }}>
+          Aftermeta <span className="badge">{svc || "?"}</span>
+        </h2>
+        <button onClick={loadHealth}>Ping</button>
       </div>
 
-      {active === 'admin' && (
-        <>
-          <AdminStatus />
-          <div style={{ height: 8 }} />
-          <AdminPanel />
-        </>
-      )}
-
-      {active === 'mint' && (
-        <MintTokenForm
-          // when a pool is created, jump straight to buy
-          onCreated={(poolId: string, initialTxid?: string) => {
-            setCurrentPoolId(poolId)
-            if (initialTxid) setCurrentTxid(initialTxid)
-            setActive('buy')
-          }}
-          // if your form broadcasts the mint tx, call this
-          onBroadcastTx={(txid: string) => setCurrentTxid(txid)}
-        />
-      )}
-
-      {active === 'pools' && (
-        <PoolViewer
-          onLoaded={(poolId: string) => setCurrentPoolId(poolId)}
-          onSelect={(poolId: string) => {
-            setCurrentPoolId(poolId)
-            setActive('buy')
-          }}
-        />
-      )}
-
-      {active === 'buy' && currentPoolId && (
-        <BuyBox
-          poolId={currentPoolId}
-          // capture buy tx so we can monitor confirmation
-          onTxSent={(txid: string) => setCurrentTxid(txid)}
-        />
-      )}
-
-      {/* Optional: show recent mints page/section somewhere */}
-      {/* <MintHistory /> */}
-f
-      {/* ---- TX monitor strip ---- */}
-      {currentTxid && (
-        <div style={{
-          marginTop: 16,
-          padding: '10px 12px',
-          border: '1px solid #e5e5e5',
-          borderRadius: 10,
-          background: '#fafafa',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12
-        }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontWeight: 600, marginBottom: 2 }}>Transaction</div>
-            <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 520 }}>
-              {currentTxid}
-            </div>
-            {txErr && <div style={{ color: '#b91c1c', fontSize: 13 }}>Status error: {txErr}</div>}
+      {/* Backend down notice */}
+      {err && (
+        <div className="card" style={{ borderColor: "#3b0f12" }}>
+          <div className="h" style={{ gap: 8 }}>
+            <span className="badge">API</span>
+            <strong style={{ color: "#ff8b8b" }}>DOWN</strong>
           </div>
-
-          <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: 14 }}>
-              Confirmed:{' '}
-              <strong style={{ color: tx?.confirmed ? '#16a34a' : '#92400e' }}>
-                {String(!!tx?.confirmed)}
-              </strong>
-            </div>
-            <div style={{ fontSize: 13, color: '#555' }}>
-              Confs: {tx?.confs ?? 0}
-              {!tx?.confirmed && tx?.nextCheckAt
-                ? ` • next check ${new Date(tx.nextCheckAt).toLocaleTimeString()}`
-                : ''}
-            </div>
-            <div style={{ marginTop: 6, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => setCurrentTxid('')}
-                style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #ddd', background: '#fff', cursor: 'pointer' }}
-                title="Stop monitoring this tx"
-              >
-                Clear
-              </button>
-              {!tx?.confirmed && (
-                <a
-                  href={`https://test.whatsonchain.com/tx/${currentTxid}`}
-                  target="_blank" rel="noreferrer"
-                  style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #ddd', background: '#fff', textDecoration: 'none' }}
-                >
-                  Open in WOC
-                </a>
-              )}
-              {tx?.confirmed && (
-                <a
-                  href={`https://whatsonchain.com/tx/${currentTxid}`}
-                  target="_blank" rel="noreferrer"
-                  style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #ddd', background: '#fff', textDecoration: 'none' }}
-                >
-                  View on WOC
-                </a>
-              )}
-            </div>
+          <div className="small" style={{ marginTop: 6 }}>
+            {err}
+          </div>
+          <div className="small" style={{ marginTop: 6 }}>
+            Fix your backend or VITE_API_URL, then refresh.
           </div>
         </div>
       )}
+
+      {/* Admin state banner */}
+      <AdminStatus />
+
+      {/* Pool creation + list */}
+      <div className="row" style={{ marginTop: 16 }}>
+        <div className="col">
+          <AdminPanel onCreated={() => setSelected(null)} />
+        </div>
+        <div className="col">
+          <PoolList onSelect={(p) => setSelected(p)} />
+        </div>
+      </div>
+
+      {/* Mint + mints table */}
+      <div className="row" style={{ marginTop: 16 }}>
+        <div className="col">
+          <MintTokenForm selectedPool={selected} />
+        </div>
+        <div className="col">
+          <div className="card">
+            <h3 style={{ marginTop: 0 }}>Recent Mints</h3>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Pool</th>
+                  <th>Tokens</th>
+                  <th>Spend</th>
+                  <th>Confirmed</th>
+                  <th>TXID</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mints.map((m) => (
+                  <tr key={m.id}>
+                    <td>
+                      <strong>{m.symbol}</strong>
+                    </td>
+                    <td className="small">
+                      <code>{m.poolId}</code>
+                    </td>
+                    <td>{m.tokens}</td>
+                    <td>{m.spendSats}</td>
+                    <td>{m.confirmed ? "yes" : "no"}</td>
+                    <td
+                      className="small"
+                      style={{
+                        maxWidth: 340,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      <code>{m.txid}</code>
+                    </td>
+                  </tr>
+                ))}
+
+                {mints.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="small">
+                      No mints yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+
+            <div className="h" style={{ justifyContent: "flex-end", marginTop: 8 }}>
+              <button onClick={loadMints}>Refresh</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
-  )
+  );
 }

@@ -1,84 +1,108 @@
-import React, { useState } from 'react'
-import { createPool } from '@/lib/api'
+import { useEffect, useState } from "react";
+import { mint, txStatus, withdrawalsCan, type Pool } from "@/lib/api";
 
-type Props = {
-  onCreated: (poolId: string) => void
-}
+type Props = { selectedPool: Pool | null };
 
-export default function MintTokenForm({ onCreated }: Props) {
-  const [symbol, setSymbol] = useState('')
-  const [creator, setCreator] = useState('')
-  const [poolAddress, setPoolAddress] = useState('')
-  const [lockingScriptHex, setLockingScriptHex] = useState('')
-  const [maxSupply, setMaxSupply] = useState<number>(1_000_000)
-  const [decimals, setDecimals] = useState<number>(8)
-  const [creatorReserve, setCreatorReserve] = useState<number>(0)
+export default function MintTokenForm({ selectedPool }: Props) {
+  const [wif, setWif] = useState("");
+  const [spend, setSpend] = useState<number>(1000);
+  const [poolId, setPoolId] = useState<string>("");
+  const [symbol, setSymbol] = useState<string>("");
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [last, setLast] = useState<{ txid: string; visible?: boolean } | null>(null);
+  const [canWd, setCanWd] = useState<{ can: boolean; reason: string | null } | null>(null);
 
-  const [busy, setBusy] = useState(false)
-  const [log, setLog] = useState('')
+  useEffect(() => {
+    if (selectedPool) {
+      setPoolId(selectedPool.id);
+      setSymbol(selectedPool.symbol);
+      refreshWithdrawals(selectedPool.id);
+    }
+  }, [selectedPool?.id]);
+
+  async function refreshWithdrawals(pid: string) {
+    try {
+      const r = await withdrawalsCan(pid);
+      setCanWd(r);
+    } catch {}
+  }
 
   async function onSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setBusy(true)
-    setLog('')
+    e.preventDefault();
+    setErr(null);
+    if (!wif.trim()) return setErr("WIF required");
+    if (!poolId.trim() && !symbol.trim()) return setErr("Select a pool or fill symbol");
+    if (!Number.isFinite(spend) || spend < 546) return setErr("spendSats must be >= 546");
+
+    setSubmitting(true);
     try {
-      if (!symbol || !creator || !poolAddress || !lockingScriptHex)
-        throw new Error('Fill all required fields')
-
-      const { pool } = await createPool({
-        symbol,
-        creator,
-        poolAddress,
-        lockingScriptHex,
-        maxSupply,
-        decimals,
-        creatorReserve,
-      })
-
-      // ✅ Dispatch event so MintHistory updates instantly
-      window.dispatchEvent(
-        new CustomEvent('aftermeta:mint', {
-          detail: {
-            txid: pool.txid || pool.lastMintTxid || pool.id, // fallback if txid missing
-            poolId: pool.id,
-            symbol,
-            sats: 0, // no sats spent on createPool, but keep shape consistent
-          },
-        })
-      )
-
-      setLog(`✅ Pool created: ${pool.id}`)
-      onCreated(pool.id)
+      const res = await mint({ wif: wif.trim(), spendSats: Math.trunc(spend), poolId, symbol });
+      setLast({ txid: res.txid, visible: res.visible });
+      setErr(null);
+      refreshWithdrawals(res.poolId);
     } catch (e: any) {
-      setLog(`❌ ${String(e?.message || e)}`)
+      setErr(String(e?.message || e));
     } finally {
-      setBusy(false)
+      setSubmitting(false);
+    }
+  }
+
+  async function checkTx() {
+    if (!last?.txid) return;
+    try {
+      const s = await txStatus(last.txid);
+      alert(`TX ${s.txid}\nconfirmed=${s.confirmed}\nblockHeight=${s.blockHeight ?? "null"}`);
+    } catch (e: any) {
+      alert(String(e?.message || e));
     }
   }
 
   return (
-    <form
-      onSubmit={onSubmit}
-      style={{ background: '#f9f9f9', padding: 16, borderRadius: 8 }}
-    >
-      <h3 style={{ marginTop: 0 }}>Mint Token (Create Pool)</h3>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-        <input placeholder="Symbol*" value={symbol} onChange={e => setSymbol(e.target.value)} />
-        <input placeholder="Creator*" value={creator} onChange={e => setCreator(e.target.value)} />
-        <input placeholder="Pool Address*" value={poolAddress} onChange={e => setPoolAddress(e.target.value)} />
-        <input placeholder="Locking Script Hex*" value={lockingScriptHex} onChange={e => setLockingScriptHex(e.target.value)} />
-        <input type="number" placeholder="Max Supply" value={maxSupply} onChange={e => setMaxSupply(Number(e.target.value || 0))} />
-        <input type="number" placeholder="Decimals" value={decimals} onChange={e => setDecimals(Number(e.target.value || 0))} />
-        <input type="number" placeholder="Creator Reserve" value={creatorReserve} onChange={e => setCreatorReserve(Number(e.target.value || 0))} />
+    <div className="card">
+      <h3 style={{marginTop:0}}>Mint</h3>
+      <form className="row" onSubmit={onSubmit}>
+        <div className="col">
+          <label className="small">Testnet WIF</label>
+          <input value={wif} onChange={e=>setWif(e.target.value)} placeholder="cR... (testnet WIF)" />
+        </div>
+        <div className="col">
+          <label className="small">Spend (sats)</label>
+          <input type="number" min={546} value={spend} onChange={e=>setSpend(Number(e.target.value)||0)} />
+        </div>
+        <div className="col">
+          <label className="small">Pool ID</label>
+          <input value={poolId} onChange={e=>setPoolId(e.target.value)} placeholder="auto set by pool selection" />
+        </div>
+        <div className="col">
+          <label className="small">Symbol</label>
+          <input value={symbol} onChange={e=>setSymbol(e.target.value.toUpperCase())} placeholder="PUMP" />
+        </div>
+        <div className="col" style={{alignSelf:"end"}}>
+          <button className="primary" disabled={submitting}>{submitting ? "Minting…" : "Mint"}</button>
+        </div>
+      </form>
+      {err && <div className="small" style={{color:"#ff8b8b", marginTop:8}}>{err}</div>}
+      <div className="h" style={{gap:12, marginTop:8}}>
+        {last?.txid && (
+          <>
+            <span className="badge">txid:</span>
+            <code style={{wordBreak:"break-all"}}>{last.txid}</code>
+            <button onClick={checkTx}>Check status</button>
+            {typeof last.visible === "boolean" && (
+              <span className="small">visible: {String(last.visible)}</span>
+            )}
+          </>
+        )}
       </div>
-
-      <div style={{ marginTop: 10 }}>
-        <button type="submit" disabled={busy}>
-          {busy ? 'Creating…' : 'Create Pool'}
-        </button>
+      <hr className="hr" />
+      <div className="h" style={{gap:8}}>
+        <span className="badge">Withdrawals</span>
+        <span className="small">
+          {canWd ? (canWd.can ? "Allowed" : `Blocked: ${canWd.reason}`) : "—"}
+        </span>
+        {poolId && <button onClick={()=>refreshWithdrawals(poolId)}>Recheck</button>}
       </div>
-
-      {log && <pre style={{ fontSize: 12, marginTop: 8 }}>{log}</pre>}
-    </form>
-  )
+    </div>
+  );
 }
