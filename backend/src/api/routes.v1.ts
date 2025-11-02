@@ -338,9 +338,10 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     const txid = await broadcastRawTx(raw);
 
     db.prepare(
-      `INSERT INTO mint_tx (txid, pool_id, symbol, sats, created_at)
-       VALUES (?, ?, ?, ?, ?)`
+  `INSERT INTO mint_tx (txid, pool_id, symbol, sats, created_at, next_check_at, check_count)
+   VALUES (?, ?, ?, ?, ?, 0, 0)`
     ).run(txid, pid, sym, spend, Date.now());
+
 
     persistResult(
       req,
@@ -354,6 +355,7 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
   }
 });
 
+// ----------------------------- mints list (JOIN + filters + cursor) -----------------------------
 // ----------------------------- mints list (JOIN + filters + cursor) -----------------------------
 r.get("/v1/mints", (req, res) => {
   try {
@@ -396,9 +398,13 @@ r.get("/v1/mints", (req, res) => {
         SELECT
           m.txid,
           m.pool_id,
-          COALESCE(NULLIF(m.symbol,''), p.symbol) AS symbol,
+          COALESCE(NULLIF(m.symbol,''), p.symbol)        AS symbol,
           m.sats,
-          m.created_at
+          m.created_at,
+          m.confirmed_at,
+          m.last_check_at,
+          m.next_check_at,
+          CASE WHEN m.confirmed_at IS NULL THEN 0 ELSE 1 END AS confirmed
         FROM mint_tx m
         LEFT JOIN pools p ON p.id = m.pool_id
         ${whereSql}
@@ -408,20 +414,31 @@ r.get("/v1/mints", (req, res) => {
       )
       .all(...params, limit) as any[];
 
+    // camelCase the response for the frontend
+    const mints = rows.map((r: any) => ({
+      txid: r.txid,
+      poolId: r.pool_id,
+      symbol: r.symbol,
+      sats: r.sats,
+      createdAt: r.created_at,
+      confirmedAt: r.confirmed_at,
+      lastCheckAt: r.last_check_at,
+      nextCheckAt: r.next_check_at,
+      confirmed: !!r.confirmed,
+    }));
+
     let nextCursor: { createdAt: number; txid: string } | null = null;
     if (rows.length === limit) {
       const last = rows[rows.length - 1];
-      nextCursor = {
-        createdAt: Number(last.created_at),
-        txid: String(last.txid),
-      };
+      nextCursor = { createdAt: Number(last.created_at), txid: String(last.txid) };
     }
 
-    res.json({ ok: true, mints: rows, nextCursor });
+    res.json({ ok: true, mints, nextCursor });
   } catch (e: any) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
 
 // ----------------------------- TX status + mint confirmation -----------------------------
 r.get("/v1/tx/:txid/status", async (req, res) => {
