@@ -2,9 +2,16 @@
 const API = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (init?.headers) {
+    new Headers(init.headers as HeadersInit).forEach((value, key) => {
+      headers.set(key, value);
+    });
+  }
+
   const r = await fetch(`${API}${path}`, {
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
     ...init,
+    headers,
   });
   const ct = r.headers.get("content-type") || "";
   if (!r.ok) {
