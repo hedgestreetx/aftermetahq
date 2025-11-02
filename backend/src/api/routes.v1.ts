@@ -26,20 +26,75 @@ const nowMs = () => Date.now();
 const isTxid = (s: string) => typeof s === "string" && /^[0-9a-fA-F]{64}$/.test(s);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const WRAPPED_BODY_KEYS = ["body", "data", "payload"];
+
 function normalizeBody(input: unknown): Record<string, unknown> {
   if (!input) return {};
+
   if (typeof input === "string") {
+    const trimmed = input.trim();
+    if (!trimmed) return {};
     try {
-      const parsed = JSON.parse(input);
-      return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+      const parsed = JSON.parse(trimmed);
+      return normalizeBody(parsed);
     } catch {
       return {};
     }
   }
-  if (typeof input === "object") {
-    return input as Record<string, unknown>;
+
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(input)) {
+    return normalizeBody(input.toString("utf8"));
   }
+
+  if (input instanceof URLSearchParams) {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of input.entries()) {
+      out[key] = value;
+    }
+    return out;
+  }
+
+  if (typeof input === "object") {
+    if (Array.isArray(input)) {
+      return input.reduce<Record<string, unknown>>((acc, item) => {
+        const normalized = normalizeBody(item);
+        for (const [k, v] of Object.entries(normalized)) {
+          if (!(k in acc) || acc[k] === undefined || acc[k] === null || acc[k] === "") {
+            acc[k] = v;
+          }
+        }
+        return acc;
+      }, {});
+    }
+
+    const obj = input as Record<string, unknown>;
+    const out: Record<string, unknown> = { ...obj };
+
+    for (const key of WRAPPED_BODY_KEYS) {
+      const nested = obj[key];
+      if (!nested) continue;
+
+      const normalized = normalizeBody(nested);
+      if (!Object.keys(normalized).length) continue;
+
+      for (const [nk, nv] of Object.entries(normalized)) {
+        if (!(nk in out) || out[nk] === undefined || out[nk] === null || out[nk] === "") {
+          out[nk] = nv;
+        }
+      }
+    }
+
+    return out;
+  }
+
   return {};
+}
+
+function getField(body: Record<string, unknown>, key: string): unknown {
+  if (key in body) return body[key];
+  const found = Object.keys(body).find((k) => k.toLowerCase() === key.toLowerCase());
+  if (found) return body[found];
+  return undefined;
 }
 
 // ----------------------------- health/admin -----------------------------
@@ -318,15 +373,18 @@ function coerceSpendSats(raw: unknown): number | null {
 r.post("/v1/mint", idempotency(), async (req, res) => {
   try {
     const body = normalizeBody(req.body);
-    const wif = typeof body.wif === "string" ? body.wif.trim() : "";
-    const spendValueRaw = coerceSpendSats(body.spendSats);
+    const wifRaw = getField(body, "wif");
+    const wif = typeof wifRaw === "string" ? wifRaw.trim() : "";
+    const spendValueRaw = coerceSpendSats(getField(body, "spendSats"));
     const spendValue =
       typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
-    const { poolId, symbol, poolLockingScriptHex } = body as {
-      poolId?: string;
-      symbol?: string;
-      poolLockingScriptHex?: string;
-    };
+    const poolIdRaw = getField(body, "poolId");
+    const symbolRaw = getField(body, "symbol");
+    const poolLockingScriptHexRaw = getField(body, "poolLockingScriptHex");
+    const poolId = typeof poolIdRaw === "string" ? poolIdRaw : undefined;
+    const symbol = typeof symbolRaw === "string" ? symbolRaw : undefined;
+    const poolLockingScriptHex =
+      typeof poolLockingScriptHexRaw === "string" ? poolLockingScriptHexRaw : undefined;
 
     if (!wif) {
       return res.status(400).json({ ok: false, error: "missing_wif" });
