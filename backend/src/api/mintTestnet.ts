@@ -128,21 +128,67 @@ router.post('/v1/mint', async (req, res) => {
   }
 })
 
-// GET /v1/mints?limit=50  — recent mints (join-free, includes symbol)
+// GET /v1/mints
 router.get('/v1/mints', (req, res) => {
   try {
+    const clamp = (n: number, lo: number, hi: number) =>
+      Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : lo
+
     const limit = clamp(Number(req.query.limit ?? 50), 1, 500)
-    const rows = db.prepare(`
-      SELECT txid, pool_id, symbol, sats, created_at
-      FROM mint_tx
-      ORDER BY created_at DESC
+
+    // Optional filters
+    const poolId = typeof req.query.poolId === 'string' ? req.query.poolId.trim() : ''
+    const symbol = typeof req.query.symbol === 'string' ? req.query.symbol.trim().toUpperCase() : ''
+
+    // Cursor-based pagination: pass the last seen (created_at, txid) to fetch older
+    const cursorCreatedAt = req.query.cursorCreatedAt ? Number(req.query.cursorCreatedAt) : 0
+    const cursorTxid = typeof req.query.cursorTxid === 'string' ? req.query.cursorTxid.trim() : ''
+
+    // Build WHERE dynamically (safe, parameterized)
+    const where: string[] = []
+    const params: any[] = []
+
+    if (poolId) { where.push('m.pool_id = ?'); params.push(poolId) }
+    if (symbol) { where.push('(COALESCE(m.symbol, p.symbol) = ?)'); params.push(symbol) }
+
+    // Strict “older than cursor” for deterministic paging
+    if (cursorCreatedAt && cursorTxid) {
+      where.push('(m.created_at < ? OR (m.created_at = ? AND m.txid < ?))')
+      params.push(cursorCreatedAt, cursorCreatedAt, cursorTxid)
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+    // Join pools to backfill symbol at read time
+    const rows = db.prepare(
+      `
+      SELECT
+        m.txid,
+        m.pool_id,
+        COALESCE(NULLIF(m.symbol, ''), p.symbol) AS symbol,
+        m.sats,
+        m.created_at
+      FROM mint_tx m
+      LEFT JOIN pools p ON p.id = m.pool_id
+      ${whereSql}
+      ORDER BY m.created_at DESC, m.txid DESC
       LIMIT ?
-    `).all(limit)
-    res.json({ ok: true, mints: rows })
+      `
+    ).all(...params, limit) as any[]
+
+    // next cursor (older than the last row returned)
+    let nextCursor: { createdAt: number; txid: string } | null = null
+    if (rows.length === limit) {
+      const last = rows[rows.length - 1]
+      nextCursor = { createdAt: Number(last.created_at), txid: String(last.txid) }
+    }
+
+    res.json({ ok: true, mints: rows, nextCursor })
   } catch (e: any) {
     res.status(500).json({ ok: false, error: String(e?.message || e) })
   }
 })
+
 
 // GET /v1/mints/symbol/:symbol  — filter by token symbol
 router.get('/v1/mints/symbol/:symbol', (req, res) => {

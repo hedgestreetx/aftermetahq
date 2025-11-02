@@ -7,7 +7,10 @@ import mintRouter from './mintTestnet.ts'
 
 const app = express()
 
-app.use(cors({ origin: 'http://localhost:5173' }))
+app.use(cors({ origin: ['http://localhost:5173'],       // add your frontend origin(s)
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','X-Request-Id'], // <-- allow it
+  credentials: false}))
 app.use(express.json())
 app.use(routesv1)
 app.use(mintRouter)
