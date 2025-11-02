@@ -371,6 +371,19 @@ function coerceSpendSats(raw: unknown): number | null {
 
 // ----------------------------- MINT (REAL + hardened WOC) -----------------------------
 r.post("/v1/mint", idempotency(), async (req, res) => {
+  console.log("req.body =", req.body);
+  const {
+    wif,
+    spendSats,
+    poolId,
+    symbol,
+    poolLockingScriptHex,
+  } = (req.body ?? {}) as Record<string, unknown>;
+
+  if (!wif) {
+    return res.status(400).json({ ok: false, error: "missing_wif" });
+  }
+
   try {
     const body = normalizeBody(req.body);
     const wifRaw = getField(body, "wif");
@@ -407,7 +420,7 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     const symUpper = (sym || "").toUpperCase();
 
     // Wallet + UTXOs
-    const priv = bsv.PrivateKey.fromWIF(wif);
+    const priv = bsv.PrivateKey.fromWIF(trimmedWif);
     const fromAddr = priv.toAddress(NET_BSV).toString();
     const utxos = await fetchUtxos(fromAddr);
     if (!utxos.length) throw new Error("no_funds");
