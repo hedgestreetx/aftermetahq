@@ -26,6 +26,110 @@ const nowMs = () => Date.now();
 const isTxid = (s: string) => typeof s === "string" && /^[0-9a-fA-F]{64}$/.test(s);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const WRAPPED_BODY_KEYS = ["body", "data", "payload"];
+
+function normalizeBody(input: unknown): Record<string, unknown> {
+  if (!input) return {};
+
+  if (typeof input === "string") {
+    const trimmed = input.trim();
+    if (!trimmed) return {};
+    try {
+      const parsed = JSON.parse(trimmed);
+      return normalizeBody(parsed);
+    } catch {
+      return {};
+    }
+  }
+
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(input)) {
+    return normalizeBody(input.toString("utf8"));
+  }
+
+  if (typeof ArrayBuffer !== "undefined") {
+    if (input instanceof ArrayBuffer) {
+      return normalizeBody(Buffer.from(input).toString("utf8"));
+    }
+    if (ArrayBuffer.isView && ArrayBuffer.isView(input as any)) {
+      const view = input as any;
+      const buf = Buffer.from(view.buffer, view.byteOffset, view.byteLength);
+      return normalizeBody(buf.toString("utf8"));
+    }
+  }
+
+  if (input instanceof URLSearchParams) {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of input.entries()) {
+      out[key] = value;
+    }
+    return out;
+  }
+
+  if (typeof input === "object") {
+    if (Array.isArray(input)) {
+      return input.reduce<Record<string, unknown>>((acc, item) => {
+        const normalized = normalizeBody(item);
+        for (const [k, v] of Object.entries(normalized)) {
+          if (!(k in acc) || acc[k] === undefined || acc[k] === null || acc[k] === "") {
+            acc[k] = v;
+          }
+        }
+        return acc;
+      }, {});
+    }
+
+    const obj = input as Record<string, unknown>;
+    const out: Record<string, unknown> = { ...obj };
+
+    for (const key of WRAPPED_BODY_KEYS) {
+      const nested = obj[key];
+      if (!nested) continue;
+
+      const normalized = normalizeBody(nested);
+      if (!Object.keys(normalized).length) continue;
+
+      for (const [nk, nv] of Object.entries(normalized)) {
+        if (!(nk in out) || out[nk] === undefined || out[nk] === null || out[nk] === "") {
+          out[nk] = nv;
+        }
+      }
+    }
+
+    return out;
+  }
+
+  return {};
+}
+
+function getField(body: Record<string, unknown>, key: string): unknown {
+  if (key in body) return body[key];
+  const found = Object.keys(body).find((k) => k.toLowerCase() === key.toLowerCase());
+  if (found) return body[found];
+  return undefined;
+}
+
+function coerceStringValue(raw: unknown): string | null {
+  if (typeof raw === "string") return raw.trim();
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) return null;
+    return String(raw);
+  }
+  if (typeof raw === "bigint") return String(raw);
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(raw)) return raw.toString("utf8").trim();
+  if (raw instanceof Uint8Array) return Buffer.from(raw).toString("utf8").trim();
+  if (typeof ArrayBuffer !== "undefined" && raw instanceof ArrayBuffer) {
+    return Buffer.from(raw).toString("utf8").trim();
+  }
+  if (raw && typeof raw === "object") {
+    const valueProp = (raw as { value?: unknown }).value;
+    if (valueProp !== undefined && valueProp !== raw) {
+      const coerced = coerceStringValue(valueProp);
+      if (coerced !== null) return coerced;
+    }
+  }
+  return null;
+}
+
 // ----------------------------- health/admin -----------------------------
 r.get("/health", (_req, res) =>
   res.json({ service: "aftermeta-backend", network: ENV.NETWORK, port: ENV.PORT })
@@ -71,12 +175,18 @@ r.get("/debug/db/summary", (_req, res) => {
 // ----------------------------- pools -----------------------------
 r.post("/v1/pools", idempotency(), (req, res) => {
   const p = req.body ?? {};
-  if (!p?.symbol || !p?.creator || !p?.poolAddress || !p?.lockingScriptHex) {
+  const hasAddr = typeof p?.poolAddress === "string" && p.poolAddress.trim().length > 0;
+  const hasScript = typeof p?.lockingScriptHex === "string" && p.lockingScriptHex.trim().length > 0;
+  if (!p?.symbol || !p?.creator || (!hasAddr && !hasScript)) {
     return res.status(400).json({ ok: false, error: "missing_fields" });
   }
 
   const id = p.id || rid();
   const createdAt = nowMs();
+  const symbol = String(p.symbol || "").trim().toUpperCase();
+  const creator = String(p.creator || "").trim();
+  const poolAddress = hasAddr ? String(p.poolAddress).trim() : "";
+  const lockingScriptHex = hasScript ? String(p.lockingScriptHex).trim() : "";
 
   db.prepare(
     `INSERT OR REPLACE INTO pools
@@ -84,10 +194,10 @@ r.post("/v1/pools", idempotency(), (req, res) => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
-    String(p.symbol).trim().toUpperCase(),
-    String(p.creator).trim(),
-    String(p.poolAddress).trim(),
-    String(p.lockingScriptHex).trim(),
+    symbol,
+    creator,
+    poolAddress,
+    lockingScriptHex,
     Number(p.maxSupply ?? 0),
     Number(p.decimals ?? 0),
     Number(p.creatorReserve ?? 0),
@@ -100,10 +210,10 @@ r.post("/v1/pools", idempotency(), (req, res) => {
     ok: true,
     pool: {
       id,
-      symbol: String(p.symbol).trim().toUpperCase(),
-      creator: p.creator,
-      poolAddress: p.poolAddress,
-      lockingScriptHex: p.lockingScriptHex,
+      symbol,
+      creator,
+      poolAddress,
+      lockingScriptHex,
       maxSupply: Number(p.maxSupply ?? 0),
       decimals: Number(p.decimals ?? 0),
       creatorReserve: Number(p.creatorReserve ?? 0),
@@ -274,12 +384,47 @@ r.get("/v1/utxos/:address", async (req, res) => {
   }
 });
 
+function coerceSpendSats(raw: unknown): number | null {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) ? raw : null;
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed.length) return null;
+    const normalized = trimmed.replace(/[,_\s]/g, "");
+    if (!/^[-+]?((\d+\.?\d*)|(\d*\.\d+))(e[-+]?\d+)?$/i.test(normalized)) {
+      const fallback = Number(normalized);
+      return Number.isFinite(fallback) ? fallback : null;
+    }
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 // ----------------------------- MINT (REAL + hardened WOC) -----------------------------
 r.post("/v1/mint", idempotency(), async (req, res) => {
   try {
-    const { wif, spendSats, poolId, symbol, poolLockingScriptHex } = req.body ?? {};
-    if (!wif || !Number.isFinite(spendSats) || spendSats <= 0) {
-      return res.status(400).json({ ok: false, error: "bad_request" });
+    const body = normalizeBody(req.body);
+    const wif = coerceStringValue(getField(body, "wif"))?.trim() || "";
+    const spendValueRaw = coerceSpendSats(getField(body, "spendSats"));
+    const spendValue =
+      typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
+    const poolIdString = coerceStringValue(getField(body, "poolId"));
+    const symbolString = coerceStringValue(getField(body, "symbol"));
+    const poolLockingScriptHexString = coerceStringValue(getField(body, "poolLockingScriptHex"));
+    const poolId = poolIdString && poolIdString.trim().length ? poolIdString.trim() : undefined;
+    const symbol = symbolString && symbolString.trim().length ? symbolString.trim() : undefined;
+    const poolLockingScriptHex =
+      poolLockingScriptHexString && poolLockingScriptHexString.trim().length
+        ? poolLockingScriptHexString.trim()
+        : undefined;
+
+    if (!wif) {
+      return res.status(400).json({ ok: false, error: "missing_wif" });
+    }
+    if (spendValue === null || spendValue <= 0) {
+      return res.status(400).json({ ok: false, error: "invalid_spend" });
     }
 
     // Resolve pool (by id/symbol/script). Hard stop if not found.
@@ -301,7 +446,7 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     const utxos = await fetchUtxos(fromAddr);
     if (!utxos.length) throw new Error("no_funds");
 
-    const spend = Math.trunc(spendSats);
+    const spend = Math.trunc(spendValue);
     if (spend < DUST) throw new Error("dust_output");
 
     const tx = new bsv.Transaction();
@@ -413,7 +558,7 @@ r.get("/v1/mints", (req, res) => {
       params.push(qPoolId);
     }
     if (qSymbol) {
-      where.push("UPPER(m.symbol) = ?");
+      where.push("m.symbol = ? COLLATE NOCASE");
       params.push(qSymbol);
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
