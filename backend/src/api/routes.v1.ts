@@ -46,17 +46,6 @@ function normalizeBody(input: unknown): Record<string, unknown> {
     return normalizeBody(input.toString("utf8"));
   }
 
-  if (typeof ArrayBuffer !== "undefined") {
-    if (input instanceof ArrayBuffer) {
-      return normalizeBody(Buffer.from(input).toString("utf8"));
-    }
-    if (ArrayBuffer.isView && ArrayBuffer.isView(input as any)) {
-      const view = input as any;
-      const buf = Buffer.from(view.buffer, view.byteOffset, view.byteLength);
-      return normalizeBody(buf.toString("utf8"));
-    }
-  }
-
   if (input instanceof URLSearchParams) {
     const out: Record<string, unknown> = {};
     for (const [key, value] of input.entries()) {
@@ -106,28 +95,6 @@ function getField(body: Record<string, unknown>, key: string): unknown {
   const found = Object.keys(body).find((k) => k.toLowerCase() === key.toLowerCase());
   if (found) return body[found];
   return undefined;
-}
-
-function coerceStringValue(raw: unknown): string | null {
-  if (typeof raw === "string") return raw.trim();
-  if (typeof raw === "number") {
-    if (!Number.isFinite(raw)) return null;
-    return String(raw);
-  }
-  if (typeof raw === "bigint") return String(raw);
-  if (typeof Buffer !== "undefined" && Buffer.isBuffer(raw)) return raw.toString("utf8").trim();
-  if (raw instanceof Uint8Array) return Buffer.from(raw).toString("utf8").trim();
-  if (typeof ArrayBuffer !== "undefined" && raw instanceof ArrayBuffer) {
-    return Buffer.from(raw).toString("utf8").trim();
-  }
-  if (raw && typeof raw === "object") {
-    const valueProp = (raw as { value?: unknown }).value;
-    if (valueProp !== undefined && valueProp !== raw) {
-      const coerced = coerceStringValue(valueProp);
-      if (coerced !== null) return coerced;
-    }
-  }
-  return null;
 }
 
 // ----------------------------- health/admin -----------------------------
@@ -406,19 +373,18 @@ function coerceSpendSats(raw: unknown): number | null {
 r.post("/v1/mint", idempotency(), async (req, res) => {
   try {
     const body = normalizeBody(req.body);
-    const wif = coerceStringValue(getField(body, "wif"))?.trim() || "";
+    const wifRaw = getField(body, "wif");
+    const wif = typeof wifRaw === "string" ? wifRaw.trim() : "";
     const spendValueRaw = coerceSpendSats(getField(body, "spendSats"));
     const spendValue =
       typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
-    const poolIdString = coerceStringValue(getField(body, "poolId"));
-    const symbolString = coerceStringValue(getField(body, "symbol"));
-    const poolLockingScriptHexString = coerceStringValue(getField(body, "poolLockingScriptHex"));
-    const poolId = poolIdString && poolIdString.trim().length ? poolIdString.trim() : undefined;
-    const symbol = symbolString && symbolString.trim().length ? symbolString.trim() : undefined;
+    const poolIdRaw = getField(body, "poolId");
+    const symbolRaw = getField(body, "symbol");
+    const poolLockingScriptHexRaw = getField(body, "poolLockingScriptHex");
+    const poolId = typeof poolIdRaw === "string" ? poolIdRaw : undefined;
+    const symbol = typeof symbolRaw === "string" ? symbolRaw : undefined;
     const poolLockingScriptHex =
-      poolLockingScriptHexString && poolLockingScriptHexString.trim().length
-        ? poolLockingScriptHexString.trim()
-        : undefined;
+      typeof poolLockingScriptHexRaw === "string" ? poolLockingScriptHexRaw : undefined;
 
     if (!wif) {
       return res.status(400).json({ ok: false, error: "missing_wif" });
