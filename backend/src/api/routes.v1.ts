@@ -71,12 +71,18 @@ r.get("/debug/db/summary", (_req, res) => {
 // ----------------------------- pools -----------------------------
 r.post("/v1/pools", idempotency(), (req, res) => {
   const p = req.body ?? {};
-  if (!p?.symbol || !p?.creator || !p?.poolAddress || !p?.lockingScriptHex) {
+  const hasAddr = typeof p?.poolAddress === "string" && p.poolAddress.trim().length > 0;
+  const hasScript = typeof p?.lockingScriptHex === "string" && p.lockingScriptHex.trim().length > 0;
+  if (!p?.symbol || !p?.creator || (!hasAddr && !hasScript)) {
     return res.status(400).json({ ok: false, error: "missing_fields" });
   }
 
   const id = p.id || rid();
   const createdAt = nowMs();
+  const symbol = String(p.symbol || "").trim().toUpperCase();
+  const creator = String(p.creator || "").trim();
+  const poolAddress = hasAddr ? String(p.poolAddress).trim() : "";
+  const lockingScriptHex = hasScript ? String(p.lockingScriptHex).trim() : "";
 
   db.prepare(
     `INSERT OR REPLACE INTO pools
@@ -84,10 +90,10 @@ r.post("/v1/pools", idempotency(), (req, res) => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
-    String(p.symbol).trim().toUpperCase(),
-    String(p.creator).trim(),
-    String(p.poolAddress).trim(),
-    String(p.lockingScriptHex).trim(),
+    symbol,
+    creator,
+    poolAddress,
+    lockingScriptHex,
     Number(p.maxSupply ?? 0),
     Number(p.decimals ?? 0),
     Number(p.creatorReserve ?? 0),
@@ -100,10 +106,10 @@ r.post("/v1/pools", idempotency(), (req, res) => {
     ok: true,
     pool: {
       id,
-      symbol: String(p.symbol).trim().toUpperCase(),
-      creator: p.creator,
-      poolAddress: p.poolAddress,
-      lockingScriptHex: p.lockingScriptHex,
+      symbol,
+      creator,
+      poolAddress,
+      lockingScriptHex,
       maxSupply: Number(p.maxSupply ?? 0),
       decimals: Number(p.decimals ?? 0),
       creatorReserve: Number(p.creatorReserve ?? 0),
@@ -274,11 +280,34 @@ r.get("/v1/utxos/:address", async (req, res) => {
   }
 });
 
+function coerceSpendSats(raw: unknown): number | null {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) ? raw : null;
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed.length) return null;
+    const normalized = trimmed.replace(/[,_\s]/g, "");
+    if (!/^[-+]?((\d+\.?\d*)|(\d*\.\d+))(e[-+]?\d+)?$/i.test(normalized)) {
+      const fallback = Number(normalized);
+      return Number.isFinite(fallback) ? fallback : null;
+    }
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 // ----------------------------- MINT (REAL + hardened WOC) -----------------------------
 r.post("/v1/mint", idempotency(), async (req, res) => {
   try {
-    const { wif, spendSats, poolId, symbol, poolLockingScriptHex } = req.body ?? {};
-    if (!wif || !Number.isFinite(spendSats) || spendSats <= 0) {
+    const body = req.body ?? {};
+    const wif = typeof body.wif === "string" ? body.wif.trim() : "";
+    const spendValueRaw = coerceSpendSats(body.spendSats);
+    const spendValue =
+      typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
+    const { poolId, symbol, poolLockingScriptHex } = body;
+    if (!wif || spendValue === null || spendValue <= 0) {
       return res.status(400).json({ ok: false, error: "bad_request" });
     }
 
@@ -301,7 +330,7 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     const utxos = await fetchUtxos(fromAddr);
     if (!utxos.length) throw new Error("no_funds");
 
-    const spend = Math.trunc(spendSats);
+    const spend = Math.trunc(spendValue);
     if (spend < DUST) throw new Error("dust_output");
 
     const tx = new bsv.Transaction();
@@ -413,7 +442,7 @@ r.get("/v1/mints", (req, res) => {
       params.push(qPoolId);
     }
     if (qSymbol) {
-      where.push("UPPER(m.symbol) = ?");
+      where.push("m.symbol = ? COLLATE NOCASE");
       params.push(qSymbol);
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
