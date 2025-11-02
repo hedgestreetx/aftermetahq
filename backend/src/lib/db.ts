@@ -1,122 +1,172 @@
-// backend/src/lib/db.ts (ESM)
-import path from "path";
-import fs from "fs";
-import Database from "better-sqlite3";
-import { fileURLToPath } from "url";
+// backend/src/lib/db.ts
+import fs from 'fs'
+import path from 'path'
+import Database from 'better-sqlite3'
+import { fileURLToPath } from 'url'
 
-// ESM-safe replacements for __dirname / __filename
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-// ---------- Stable DB path (stop using process.cwd) ----------
-const BACKEND_ROOT = path.resolve(__dirname, "..", "..");
-const DEFAULT_DB = path.resolve(BACKEND_ROOT, "aftermeta.db");
-const DB_FILE = (process.env.DB_FILE && process.env.DB_FILE.trim()) || DEFAULT_DB;
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
+// Project root: backend = two levels up from this file (backend/src/lib -> backend)
+const BACKEND_ROOT = path.resolve(__dirname, '..', '..')
 
-fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+// DB lives at backend/aftermeta.db (sibling to package.json)
+const DB_PATH = path.resolve(BACKEND_ROOT, 'aftermeta.db')
+// Migrations folder: backend/migrations/*.sql (001_init.sql, 002_whatever.sql, …)
+const MIGRATIONS_DIR = path.resolve(BACKEND_ROOT, 'migrations')
 
-export const db = new Database(DB_FILE);
+// Ensure parent dir exists
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
 
-// Fast, safe defaults
-db.pragma("journal_mode = WAL");
-db.pragma("synchronous = NORMAL");
+// Open DB
+export const db = new Database(DB_PATH)
 
-// ---------- Base schema (idempotent) ----------
-db.exec(`
-CREATE TABLE IF NOT EXISTS pools (
-  id TEXT PRIMARY KEY,
-  symbol TEXT NOT NULL,
-  creator TEXT,
-  pool_address TEXT,
-  locking_script_hex TEXT,
-  max_supply INTEGER,
-  decimals INTEGER,
-  creator_reserve INTEGER,
-  created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_pools_symbol ON pools(symbol);
+// 🔒 Pragmas — do this before any queries
+db.pragma('journal_mode = WAL')       // better concurrency + crash safety
+db.pragma('synchronous = NORMAL')     // good balance for dev
+db.pragma('foreign_keys = ON')        // ENFORCE FK or your data will rot
 
-CREATE TABLE IF NOT EXISTS pool_supply (
-  pool_id TEXT PRIMARY KEY,
-  minted_supply INTEGER NOT NULL DEFAULT 0
-);
+// Simple logging so you stop inspecting the wrong file
+console.log(`[DB] using file: ${DB_PATH}`)
+console.log(`[DB] migrations dir: ${MIGRATIONS_DIR}`)
 
-/* Keep your existing columns for mint_tx, we'll add verify columns below */
-CREATE TABLE IF NOT EXISTS mint_tx (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  txid TEXT NOT NULL UNIQUE,
-  pool_id TEXT NOT NULL,
-  symbol TEXT NOT NULL,
-  sats INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  confirmed_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_mint_tx_created_at ON mint_tx(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_mint_tx_pool ON mint_tx(pool_id);
+// Schema migrations runner ----------------------------------------------------
+function listMigrationFiles(): string[] {
+  if (!fs.existsSync(MIGRATIONS_DIR)) return []
+  return fs
+    .readdirSync(MIGRATIONS_DIR)
+    .filter(f => f.toLowerCase().endsWith('.sql'))
+    .sort() // rely on 001_, 002_… order
+}
 
-/* Keep your existing buy_tx columns; we'll add verify columns below */
-CREATE TABLE IF NOT EXISTS buy_tx (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  txid TEXT NOT NULL UNIQUE,
-  pool_id TEXT NOT NULL,
-  symbol TEXT NOT NULL,
-  spend_sats INTEGER NOT NULL,
-  filled_tokens INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  confirmed_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_buy_tx_created_at ON buy_tx(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_buy_tx_pool ON buy_tx(pool_id);
+function ensureMigrationsTable() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      filename TEXT UNIQUE NOT NULL,
+      applied_at INTEGER NOT NULL
+    );
+  `)
+}
 
-CREATE TABLE IF NOT EXISTS withdrawals (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  pool_id TEXT NOT NULL,
-  amount_sats INTEGER NOT NULL,
-  to_address TEXT NOT NULL,
-  status TEXT NOT NULL, -- PENDING | SENT | FAILED
-  reason TEXT,
-  created_at INTEGER NOT NULL,
-  sent_txid TEXT,
-  sent_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_withdrawals_pool ON withdrawals(pool_id);
-`);
+function appliedMigrationsSet(): Set<string> {
+  ensureMigrationsTable()
+  const rows = db.prepare(`SELECT filename FROM schema_migrations ORDER BY id`).all() as Array<{filename:string}>
+  return new Set(rows.map(r => r.filename))
+}
 
-// ---------- Ensure verify columns exist (works on old SQLite) ----------
-function ensureColumn(table: string, column: string, ddl: string) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{name:string}>;
-  if (!cols.some(c => c.name === column)) {
-    console.warn(`[DB] add ${table}.${column}`);
-    db.exec(ddl);
+function applyMigrationFile(filename: string) {
+  const full = path.join(MIGRATIONS_DIR, filename)
+  const sql = fs.readFileSync(full, 'utf8')
+  // Run whole file in a transaction — it either applies or it doesn’t
+  const txn = db.transaction(() => {
+    db.exec(sql)
+    db.prepare(
+      `INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)`
+    ).run(filename, Date.now())
+  })
+  txn()
+  console.log(`[DB] migrated: ${filename}`)
+}
+
+export function migrate() {
+  const files = listMigrationFiles()
+  if (files.length === 0) {
+    console.warn('[DB] No migrations found. Bootstrapping minimal schema (dev-only).')
+    bootstrapMinimalSchema()
+    return
+  }
+  const applied = appliedMigrationsSet()
+  for (const f of files) {
+    if (!applied.has(f)) applyMigrationFile(f)
   }
 }
 
-// mint_tx verify columns
-ensureColumn("mint_tx", "last_check_at",  "ALTER TABLE mint_tx ADD COLUMN last_check_at INTEGER;");
-ensureColumn("mint_tx", "next_check_at",  "ALTER TABLE mint_tx ADD COLUMN next_check_at INTEGER;");
-ensureColumn("mint_tx", "check_count",    "ALTER TABLE mint_tx ADD COLUMN check_count INTEGER NOT NULL DEFAULT 0;");
-// confirmed_at already exists in your base create; if not, this would add it:
-// ensureColumn("mint_tx", "confirmed_at",  "ALTER TABLE mint_tx ADD COLUMN confirmed_at INTEGER;");
+// Minimal fallback schema (used only if you have no migrations yet) ----------
+function bootstrapMinimalSchema() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pools (
+      id TEXT PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      creator TEXT NOT NULL,
+      pool_address TEXT NOT NULL,
+      locking_script_hex TEXT,
+      max_supply INTEGER DEFAULT 0,
+      decimals INTEGER DEFAULT 0,
+      creator_reserve INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
 
-// buy_tx verify columns
-ensureColumn("buy_tx",  "last_check_at",  "ALTER TABLE buy_tx ADD COLUMN last_check_at INTEGER;");
-ensureColumn("buy_tx",  "next_check_at",  "ALTER TABLE buy_tx ADD COLUMN next_check_at INTEGER;");
-ensureColumn("buy_tx",  "check_count",    "ALTER TABLE buy_tx ADD COLUMN check_count INTEGER NOT NULL DEFAULT 0;");
-ensureColumn("buy_tx",  "confirmed_at",   "ALTER TABLE buy_tx ADD COLUMN confirmed_at INTEGER;");
+    CREATE TABLE IF NOT EXISTS mint_tx (
+      txid TEXT PRIMARY KEY,
+      pool_id TEXT NOT NULL REFERENCES pools(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+      symbol TEXT,
+      sats INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      confirmed_at INTEGER,
+      last_check_at INTEGER,
+      next_check_at INTEGER,
+      check_count INTEGER NOT NULL DEFAULT 0
+    );
 
-// Helpful indexes for verifier queries
-db.exec(`
-CREATE INDEX IF NOT EXISTS idx_mint_tx_pending ON mint_tx(next_check_at, confirmed_at);
-CREATE INDEX IF NOT EXISTS idx_buy_tx_pending  ON buy_tx(next_check_at, confirmed_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_buy_tx_txid ON buy_tx(txid);
-`);
+    CREATE TABLE IF NOT EXISTS buy_tx (
+      txid TEXT PRIMARY KEY,
+      pool_id TEXT NOT NULL REFERENCES pools(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+      symbol TEXT,
+      spend_sats INTEGER NOT NULL,
+      filled_tokens INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      confirmed_at INTEGER,
+      last_check_at INTEGER,
+      next_check_at INTEGER,
+      check_count INTEGER NOT NULL DEFAULT 0
+    );
 
-// ---- Introspection helper (used by /debug/dbinfo) ----
-export function dbInfo() {
-  const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`).all() as Array<{ name: string }>;
-  return { file: DB_FILE, tables: tables.map(t => t.name) };
+    CREATE TABLE IF NOT EXISTS pool_supply (
+      pool_id TEXT PRIMARY KEY REFERENCES pools(id) ON DELETE CASCADE,
+      minted_supply INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mint_tx_created_at ON mint_tx(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_mint_tx_pool_id    ON mint_tx(pool_id);
+    CREATE INDEX IF NOT EXISTS idx_buy_tx_created_at  ON buy_tx(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_buy_tx_pool_id     ON buy_tx(pool_id);
+  `)
 }
 
-// Loud and clear on boot
-console.log(`[DB] file => ${DB_FILE}`);
-console.log(`[DB] tables => ${dbInfo().tables.join(", ") || "(none)"}`);
+// Introspection for /debug/dbinfo -------------------------------------------
+export function dbInfo() {
+  const tables = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type='table' AND name NOT LIKE 'sqlite_%'
+    ORDER BY name
+  `).all() as Array<{name:string}>
+
+  const pragmaFK = db.pragma('foreign_keys', { simple: true }) as unknown as Array<{ foreign_keys: number }>
+  const fkOn = Array.isArray(pragmaFK) ? (pragmaFK[0]?.foreign_keys === 1) : true
+
+  const counts: Record<string, number> = {}
+  for (const t of tables) {
+    try {
+      const c = db.prepare(`SELECT COUNT(1) AS c FROM ${t.name}`).get() as any
+      counts[t.name] = Number(c?.c || 0)
+    } catch {
+      counts[t.name] = -1
+    }
+  }
+
+  return {
+    path: DB_PATH,
+    tables: tables.map(t => t.name),
+    counts,
+    foreignKeys: fkOn,
+  }
+}
+
+// Kick migrations at module import (safe for dev, idempotent)
+try {
+  migrate()
+} catch (e) {
+  console.error('[DB] migration error:', e)
+  throw e
+}

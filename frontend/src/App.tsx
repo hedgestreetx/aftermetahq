@@ -92,7 +92,7 @@ export default function App() {
 
       {/* Optional: show recent mints page/section somewhere */}
       {/* <MintHistory /> */}
-
+f
       {/* ---- TX monitor strip ---- */}
       {currentTxid && (
         <div style={{

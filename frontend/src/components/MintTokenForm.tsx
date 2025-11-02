@@ -1,7 +1,11 @@
 import React, { useState } from 'react'
 import { createPool } from '@/lib/api'
 
-export default function MintTokenForm({ onCreated }: { onCreated: (poolId: string) => void }) {
+type Props = {
+  onCreated: (poolId: string) => void
+}
+
+export default function MintTokenForm({ onCreated }: Props) {
   const [symbol, setSymbol] = useState('')
   const [creator, setCreator] = useState('')
   const [poolAddress, setPoolAddress] = useState('')
@@ -18,8 +22,31 @@ export default function MintTokenForm({ onCreated }: { onCreated: (poolId: strin
     setBusy(true)
     setLog('')
     try {
-      if (!symbol || !creator || !poolAddress || !lockingScriptHex) throw new Error('Fill all required fields')
-      const { pool } = await createPool({ symbol, creator, poolAddress, lockingScriptHex, maxSupply, decimals, creatorReserve })
+      if (!symbol || !creator || !poolAddress || !lockingScriptHex)
+        throw new Error('Fill all required fields')
+
+      const { pool } = await createPool({
+        symbol,
+        creator,
+        poolAddress,
+        lockingScriptHex,
+        maxSupply,
+        decimals,
+        creatorReserve,
+      })
+
+      // ✅ Dispatch event so MintHistory updates instantly
+      window.dispatchEvent(
+        new CustomEvent('aftermeta:mint', {
+          detail: {
+            txid: pool.txid || pool.lastMintTxid || pool.id, // fallback if txid missing
+            poolId: pool.id,
+            symbol,
+            sats: 0, // no sats spent on createPool, but keep shape consistent
+          },
+        })
+      )
+
       setLog(`✅ Pool created: ${pool.id}`)
       onCreated(pool.id)
     } catch (e: any) {
@@ -30,7 +57,10 @@ export default function MintTokenForm({ onCreated }: { onCreated: (poolId: strin
   }
 
   return (
-    <form onSubmit={onSubmit} style={{ background: '#f9f9f9', padding: 16, borderRadius: 8 }}>
+    <form
+      onSubmit={onSubmit}
+      style={{ background: '#f9f9f9', padding: 16, borderRadius: 8 }}
+    >
       <h3 style={{ marginTop: 0 }}>Mint Token (Create Pool)</h3>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
         <input placeholder="Symbol*" value={symbol} onChange={e => setSymbol(e.target.value)} />
@@ -41,9 +71,13 @@ export default function MintTokenForm({ onCreated }: { onCreated: (poolId: strin
         <input type="number" placeholder="Decimals" value={decimals} onChange={e => setDecimals(Number(e.target.value || 0))} />
         <input type="number" placeholder="Creator Reserve" value={creatorReserve} onChange={e => setCreatorReserve(Number(e.target.value || 0))} />
       </div>
+
       <div style={{ marginTop: 10 }}>
-        <button type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create Pool'}</button>
+        <button type="submit" disabled={busy}>
+          {busy ? 'Creating…' : 'Create Pool'}
+        </button>
       </div>
+
       {log && <pre style={{ fontSize: 12, marginTop: 8 }}>{log}</pre>}
     </form>
   )
