@@ -1,96 +1,146 @@
-const API_BASE = import.meta.env.VITE_API_URL || ''
+// frontend/src/lib/api.ts
+// Unified Aftermeta API client (frontend → backend)
 
-async function j<T>(p: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(`${API_BASE}${p}`, init)
-  const data = await r.json().catch(() => ({}))
-  if (!r.ok || data?.ok === false) {
-    throw new Error(data?.error || `HTTP ${r.status}`)
+export const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/+$/, '') ||
+  'http://localhost:3000'
+
+// -----------------------------------------------------------------------------
+// Core JSON wrapper
+// -----------------------------------------------------------------------------
+async function j<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  headers?: Record<string, string>
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: { 'content-type': 'application/json', ...(headers || {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+
+  const ct = res.headers.get('content-type') || ''
+  if (!ct.includes('application/json')) {
+    const preview = await res.text()
+    throw new Error(
+      `Non-JSON from ${path} (status ${res.status}). CT:${ct}. Preview: ${preview.slice(0, 150)}`
+    )
   }
+
+  const data = (await res.json()) as any
+  if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`)
   return data as T
 }
 
-export type QuoteRes = { ok: true, network: string, feePerKb: number }
-
-export async function health() {
-  return j<{ ok: true, service: string, env: any }>('/health')
+// -----------------------------------------------------------------------------
+// Health / Admin
+// -----------------------------------------------------------------------------
+export function health() {
+  return j<{ ok: true }>('GET', '/health')
 }
 
-export async function adminState() {
-  return j<{ ok: true, network: string, feePerKb: number, devBuyEnabled: boolean, poolLockingScriptHexLen: number, minConfs: number, poolAddr: string }>('/admin/state')
+export type AdminState = {
+  ok: true
+  network: 'testnet' | 'mainnet'
+  feePerKb: number
+  minConfs: number
+  flags: {
+    devBuyEnabled: boolean
+    requireMinConfs: number
+    maxSlippageBps: number
+  }
+  poolAddr: string
+  poolLockingScriptHexLen: number
+}
+export function adminState() {
+  return j<AdminState>('GET', '/v1/admin/state')
 }
 
-export async function adminPoolBalance() {
-  return j<{ ok: true, poolAddress: string|null, satoshis: number }>('/admin/pool/balance')
-}
-
-export async function getUtxos(address: string) {
-  return j<{ ok: true, address: string, utxos: Array<any> }>(`/api/utxos/${address}`)
-}
-
-export type DevBuyBody = { payFrom: string, spendSats: number }
-
-export async function devBuy(body: DevBuyBody) {
-  return j<{ ok: true, unsignedTxHex: string, summary: any, devBuyAllowed: boolean, network: string }>(
-    '/api/dev/buy',
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+// -----------------------------------------------------------------------------
+// UTXOs (testnet passthrough)
+// -----------------------------------------------------------------------------
+export function getUtxos(addr: string) {
+  return j<{ ok: true; utxos: Array<{ tx_hash: string; tx_pos: number; value: number }> }>(
+    'GET',
+    `/v1/utxos/${encodeURIComponent(addr)}`
   )
 }
 
-export async function broadcast(raw: string) {
-  return j<{ ok: true, txid: string }>('/api/broadcast', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ raw })
-  })
-}
-
-export async function txStatus(txid: string) {
-  return j<{ ok: true, data: any }>(`/api/tx/${txid}`)
-}
-
-export { API_BASE }
-
-// --- Day 11: Pools ---
+// -----------------------------------------------------------------------------
+// Pools (create + fetch)
+// -----------------------------------------------------------------------------
 export type Pool = {
   id: string
   symbol: string
   creator: string
   poolAddress: string
   lockingScriptHex: string
-  createdAt: string
+  maxSupply: number
+  decimals: number
+  creatorReserve: number
 }
-
-// frontend/src/lib/api.ts
-export async function createPool(input: {
+export type PoolRead = {
+  ok: true
+  pool: Pool
+  supply: { mintedSupply: number; left: number; percentMinted: number }
+}
+export function createPool(input: {
+  id?: string
   symbol: string
   creator: string
-  maxSupply?: number
-  decimals?: number
-  creatorReserve?: number
+  poolAddress: string
+  lockingScriptHex: string
+  maxSupply: number
+  decimals: number
+  creatorReserve: number
 }) {
-  return j('/api/pool/create', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input)
+  return j<{ ok: true; pool: Pool; supply: { minted: number } }>('POST', '/v1/pools', input, {
+    'x-request-id': crypto.randomUUID(),
   })
 }
-export async function listPools(): Promise<{ ok: true; pools: Pool[] }>{
-  return j('/api/pool/list')
+export function getPool(id: string) {
+  return j<PoolRead>('GET', `/v1/pools/${encodeURIComponent(id)}`)
 }
 
-export async function getPool(id: string): Promise<{ ok: true; pool: Pool }>{
-  return j(`/api/pool/${encodeURIComponent(id)}`)
+// -----------------------------------------------------------------------------
+// Pricing + Orders (off-chain simulation for now)
+// -----------------------------------------------------------------------------
+export function quoteBuy(body: { poolId: string; spendSats: number; maxSlippageBps: number }) {
+  return j<{ ok: true; quoteId: string; price: number; expiresAt: number }>(
+    'POST',
+    '/v1/quotes/buy',
+    body
+  )
+}
+export function orderBuy(body: { quoteId: string; poolId: string; spendSats: number }) {
+  return j<{ ok: true; orderId: string; txid: string; filledTokens: number }>(
+    'POST',
+    '/v1/orders/buy',
+    body,
+    { 'x-request-id': crypto.randomUUID() }
+  )
 }
 
-
-export async function poolBuy(id: string, body: { spendSats: number }) {
-  return j(`/api/pool/${encodeURIComponent(id)}/buy`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  })
+// -----------------------------------------------------------------------------
+// Real on-chain mint (testnet) — now carries poolId + symbol
+// -----------------------------------------------------------------------------
+export function mintToken(body: {
+  wif: string
+  spendSats: number
+  poolLockingScriptHex: string
+  poolId?: string
+  symbol?: string
+}) {
+  return j<{ ok: true; txid: string }>('POST', '/v1/mint', body)
 }
 
-export async function poolState(id: string) {
-  return j(`/api/pool/${encodeURIComponent(id)}/state`)
+// -----------------------------------------------------------------------------
+// Mint history (includes symbol for join-free reads)
+// -----------------------------------------------------------------------------
+export function getMintHistory() {
+  return j<{
+    ok: true
+    mints: Array<{ txid: string; pool_id: string; symbol?: string; sats: number; created_at: number }>
+  }>('GET', '/v1/mints')
 }

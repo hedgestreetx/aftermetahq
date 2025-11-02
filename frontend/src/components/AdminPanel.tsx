@@ -1,81 +1,41 @@
-import React from 'react'
-import { adminPoolBalance, devBuy, getUtxos } from '@/lib/api'
+import React, { useEffect, useState } from 'react'
+import { adminState } from '@/lib/api'
+import MintHistory from '@/components/MintHistory'
 
 export default function AdminPanel() {
-  const [payFrom, setPayFrom] = React.useState('')
-  const [spendSats, setSpendSats] = React.useState(1000)
-  const [logs, setLogs] = React.useState<string[]>([])
+  const [state, setState] = useState<any>(null)
+  const [error, setError] = useState<string>('')
 
-  function log(s: string) {
-    setLogs(prev => [`${new Date().toLocaleTimeString()}: ${s}`, ...prev])
-  }
+  useEffect(() => {
+    adminState()
+      .then(setState)
+      .catch((e) => setError(String(e?.message || e)))
+  }, [])
 
-  async function onLoadPool() {
-    try {
-      const b = await adminPoolBalance()
-      log(`Pool: ${b.poolAddress} balance ~ ${b.satoshis} sats`)
-    } catch (e: any) {
-      log(`Pool err: ${String(e?.message || e)}`)
-    }
-  }
-
-  async function onUtxos() {
-    try {
-      const u = await getUtxos(payFrom)
-      log(`UTXOs: ${u.utxos.length}`)
-    } catch (e: any) {
-      log(`UTXOs err: ${String(e?.message || e)}`)
-    }
-  }
-
-  async function onDevBuy() {
-    try {
-      const r = await devBuy({ payFrom, spendSats })
-      const txid = r.txid || '(no txid)'
-      const fee = r.feePaid ?? 'n/a'
-      log(`DevBuy ok. txid=${txid} fee=${fee} sats`)
-    } catch (e: any) {
-      log(`DevBuy err: ${String(e?.message || e)}`)
-    }
-  }
+  if (error)
+    return <div style={{ color: 'red' }}>AdminPanel error: {error}</div>
+  if (!state)
+    return <div>Loading admin panel…</div>
 
   return (
-    <div style={{ border: '1px solid #ddd', padding: 16, borderRadius: 8 }}>
-      <h3>Admin Panel</h3>
+    <div style={{ background: '#f5f5f5', padding: 16, borderRadius: 8 }}>
+      <h3 style={{ marginTop: 0 }}>Admin Panel</h3>
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-        <input
-          style={{ flex: 1, padding: 8 }}
-          placeholder="Your testnet address (base58)"
-          value={payFrom}
-          onChange={e => setPayFrom(e.target.value)}
-        />
-        <input
-          style={{ width: 160, padding: 8 }}
-          type="number"
-          min={0}
-          value={spendSats}
-          onChange={e => setSpendSats(parseInt(e.target.value || '0', 10))}
-        />
-        <button onClick={onUtxos}>UTXOs</button>
-        <button onClick={onDevBuy}>Dev Buy</button>
-        <button onClick={onLoadPool}>Pool Bal</button>
-      </div>
-
-      <div
+      <pre
         style={{
-          fontFamily: 'monospace',
-          whiteSpace: 'pre-wrap',
           fontSize: 12,
-          maxHeight: 240,
-          overflow: 'auto',
-          background: '#fafafa',
-          padding: 8
+          margin: 0,
+          background: '#fff',
+          padding: 8,
+          borderRadius: 4,
+          overflowX: 'auto',
         }}
       >
-        {logs.map((l, i) => (
-          <div key={i}>{l}</div>
-        ))}
+        {JSON.stringify(state, null, 2)}
+      </pre>
+
+      <div style={{ marginTop: 24 }}>
+        <MintHistory />
       </div>
     </div>
   )
