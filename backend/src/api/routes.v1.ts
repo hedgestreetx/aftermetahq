@@ -413,7 +413,7 @@ r.get("/v1/mints", (req, res) => {
       params.push(qPoolId);
     }
     if (qSymbol) {
-      where.push("UPPER(m.symbol) = ?");
+      where.push("m.symbol = ? COLLATE NOCASE");
       params.push(qSymbol);
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
