@@ -43,6 +43,22 @@ CREATE TABLE IF NOT EXISTS pools (
 );
 
 CREATE TABLE IF NOT EXISTS pool_supply (
-  pool_id TEXT PRIMARY KEY,
+  pool_id TEXT PRIMARY KEY REFERENCES pools(id) ON UPDATE CASCADE ON DELETE CASCADE,
   minted_supply INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS mints (
+  id TEXT PRIMARY KEY,
+  pool_id TEXT NOT NULL REFERENCES pools(id) ON UPDATE CASCADE ON DELETE CASCADE,
+  symbol TEXT NOT NULL,
+  account TEXT NOT NULL,
+  spend_sats INTEGER NOT NULL,
+  tokens INTEGER NOT NULL,
+  txid TEXT NOT NULL UNIQUE,
+  confirmed INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mints_pool ON mints(pool_id);
+CREATE INDEX IF NOT EXISTS idx_mints_symbol ON mints(symbol COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_mints_confirmed ON mints(confirmed);
