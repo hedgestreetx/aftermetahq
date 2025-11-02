@@ -217,3 +217,16 @@ export function getMintHistory(params?: {
     nextCursor?: { createdAt: number; txid: string } | null
   }>('GET', `/v1/mints${suffix}`)
 }
+// tx status + (optional) batch verify
+export function txStatus(txid: string) {
+  return j<{ ok: true; txid: string; confirmed: boolean; blockHeight: number | null; blockTime: string | null }>(
+    'GET',
+    `/v1/tx/${encodeURIComponent(txid)}/status`
+  )
+}
+
+export function verifyAllMints() {
+  return j<{ ok: true; scanned: number; updated: number }>('POST', '/v1/mints/verify', undefined, {
+    'X-Request-Id': (crypto.randomUUID && crypto.randomUUID()) || `rid-${Date.now()}`
+  })
+}
