@@ -280,17 +280,34 @@ r.get("/v1/utxos/:address", async (req, res) => {
   }
 });
 
+function coerceSpendSats(raw: unknown): number | null {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) ? raw : null;
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed.length) return null;
+    const normalized = trimmed.replace(/[,_\s]/g, "");
+    if (!/^[-+]?((\d+\.?\d*)|(\d*\.\d+))(e[-+]?\d+)?$/i.test(normalized)) {
+      const fallback = Number(normalized);
+      return Number.isFinite(fallback) ? fallback : null;
+    }
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 // ----------------------------- MINT (REAL + hardened WOC) -----------------------------
 r.post("/v1/mint", idempotency(), async (req, res) => {
   try {
     const body = req.body ?? {};
     const wif = typeof body.wif === "string" ? body.wif.trim() : "";
+    const spendValueRaw = coerceSpendSats(body.spendSats);
     const spendValue =
-      typeof body.spendSats === "string" && body.spendSats.trim().length
-        ? Number(body.spendSats)
-        : Number(body.spendSats);
+      typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
     const { poolId, symbol, poolLockingScriptHex } = body;
-    if (!wif || !Number.isFinite(spendValue) || spendValue <= 0) {
+    if (!wif || spendValue === null || spendValue <= 0) {
       return res.status(400).json({ ok: false, error: "bad_request" });
     }
 
