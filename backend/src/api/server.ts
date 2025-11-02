@@ -7,9 +7,9 @@ import { ENV } from "../lib/env";
 import routesv1 from "./routes.v1";
 import mintRouter from "./mintTestnet";
 
-// ✅ Side-effect import to ensure DB opens and PRAGMAs (foreign_keys=ON) run once
-//    (db.ts should call: db.pragma("foreign_keys = ON"))
-import "../lib/db";
+// ✅ Ensure database is opened and migrations are applied exactly once on boot
+import { migrate } from "../lib/db";
+migrate();
 
 // ----------------------------- App & Middleware -----------------------------
 const app = express();
