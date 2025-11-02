@@ -26,6 +26,22 @@ const nowMs = () => Date.now();
 const isTxid = (s: string) => typeof s === "string" && /^[0-9a-fA-F]{64}$/.test(s);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function normalizeBody(input: unknown): Record<string, unknown> {
+  if (!input) return {};
+  if (typeof input === "string") {
+    try {
+      const parsed = JSON.parse(input);
+      return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof input === "object") {
+    return input as Record<string, unknown>;
+  }
+  return {};
+}
+
 // ----------------------------- health/admin -----------------------------
 r.get("/health", (_req, res) =>
   res.json({ service: "aftermeta-backend", network: ENV.NETWORK, port: ENV.PORT })
@@ -301,14 +317,22 @@ function coerceSpendSats(raw: unknown): number | null {
 // ----------------------------- MINT (REAL + hardened WOC) -----------------------------
 r.post("/v1/mint", idempotency(), async (req, res) => {
   try {
-    const body = req.body ?? {};
+    const body = normalizeBody(req.body);
     const wif = typeof body.wif === "string" ? body.wif.trim() : "";
     const spendValueRaw = coerceSpendSats(body.spendSats);
     const spendValue =
       typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
-    const { poolId, symbol, poolLockingScriptHex } = body;
-    if (!wif || spendValue === null || spendValue <= 0) {
-      return res.status(400).json({ ok: false, error: "bad_request" });
+    const { poolId, symbol, poolLockingScriptHex } = body as {
+      poolId?: string;
+      symbol?: string;
+      poolLockingScriptHex?: string;
+    };
+
+    if (!wif) {
+      return res.status(400).json({ ok: false, error: "missing_wif" });
+    }
+    if (spendValue === null || spendValue <= 0) {
+      return res.status(400).json({ ok: false, error: "invalid_spend" });
     }
 
     // Resolve pool (by id/symbol/script). Hard stop if not found.
