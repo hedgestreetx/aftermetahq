@@ -5,6 +5,10 @@ import { reqNonNegativeInt, assert } from '../lib/validate.js'
 import { estimateFeeSats } from '../lib/fees.js'
 import { wocAddressUtxos, wocBroadcastTx } from '../adapters/woc.js'
 import { bsv } from 'scrypt-ts'
+import { db } from '../lib/db.js'
+import { tokensFromSpend } from '../lib/price.js'
+
+
 
 const BASE58 = /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/
 
@@ -65,8 +69,23 @@ export default function registerPoolBuy(app: Router) {
       tx.sign(key)
       assert(tx.isFullySigned(), 'tx not fully signed')
 
+            // --- Bonding curve supply update ---
+      const currentMinted = pool.mintedSupply || 0
+      const maxSupply = pool.maxSupply || 1_000_000
+
+      // Convert spendSats into minted tokens
+      const { tokens, costUsed } = tokensFromSpend(Number(spendSats), currentMinted)
+      if (tokens <= 0) throw new Error('Spend too low for current price')
+      if (currentMinted + tokens > maxSupply) throw new Error('Pool max supply reached')
+
+      // Update DB
+      db.prepare('UPDATE pools SET mintedSupply = mintedSupply + ? WHERE id = ?').run(tokens, pool.id)
+
+console.log(`Minted ${tokens} new tokens @pool ${pool.symbol}`)
+
       const rawhex = tx.serialize({ disableDustOutputs: false })
       const txid = await wocBroadcastTx(rawhex)
+
 
       res.json({
         ok: true,
@@ -84,3 +103,4 @@ export default function registerPoolBuy(app: Router) {
     }
   })
 }
+
