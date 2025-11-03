@@ -63,6 +63,13 @@ export type MintRow = {
 export const health = () => req<{ service: string; network: string; port: number }>("/health");
 export const adminState = () => req<AdminState>("/v1/admin/state");
 export const listPools = () => req<{ ok: true; pools: Pool[] }>("/v1/pools");
+
+export const getPool = (poolId: string) =>
+  req<{
+    ok: true;
+    pool: Pool;
+    supply: { mintedSupply: number; left: number; percentMinted: number };
+  }>(`/v1/pools/${encodeURIComponent(poolId)}`);
 export const createPool = (body: Partial<Pool>) =>
   req<{ ok: true; pool: Pool; supply: { mintedSupply: number } }>("/v1/pools", {
     method: "POST",
@@ -89,6 +96,51 @@ export const mint = (body: {
     "/v1/mint",
     { method: "POST", body: JSON.stringify(body), headers: { "X-Request-Id": crypto.randomUUID() } }
   );
+
+export type MintTokenRequest = Parameters<typeof mint>[0];
+export type MintTokenResponse = Awaited<ReturnType<typeof mint>>;
+
+export const mintToken = (body: MintTokenRequest) => mint(body);
+
+export type BuyQuoteRequest = {
+  poolId: string;
+  spendSats: number;
+  maxSlippageBps?: number;
+};
+
+export type BuyQuoteResponse = {
+  quoteId: string;
+  price: number;
+  expiresAt: number;
+};
+
+export async function quoteBuy(body: BuyQuoteRequest): Promise<BuyQuoteResponse> {
+  const res = await req<{ ok: true; quote: BuyQuoteResponse }>("/v1/buy/quote", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return res.quote;
+}
+
+export type OrderBuyRequest = {
+  quoteId: string;
+  poolId: string;
+  spendSats: number;
+};
+
+export type OrderBuyResponse = {
+  txid: string;
+  filledTokens: number;
+};
+
+export async function orderBuy(body: OrderBuyRequest): Promise<OrderBuyResponse> {
+  const res = await req<{ ok: true; order: OrderBuyResponse }>("/v1/buy/order", {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: { "X-Request-Id": crypto.randomUUID() },
+  });
+  return res.order;
+}
 
 export const txStatus = (txid: string) =>
   req<{ ok: true; txid: string; confirmed: boolean; blockHeight: number | null; blockTime: null }>(
