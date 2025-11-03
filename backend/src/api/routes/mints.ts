@@ -5,8 +5,6 @@ import { bsv } from "scrypt-ts";
 import { db } from "../../lib/db";
 import { ENV } from "../../lib/env";
 import { appendLedger, refreshSupply } from "../../lib/ledger";
-import { rememberMintQuote } from "../../lib/mintQuoteStore";
-import { calcTokens, DUST_SATS, estimateFee, MintUtxo, selectUtxos } from "../../lib/txutil";
 import { idempotency, persistResult } from "../idempotency";
 
 const r = Router();
@@ -14,7 +12,7 @@ const r = Router();
 const clamp = (n: number, lo: number, hi: number) =>
   Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : lo;
 
-const DUST = DUST_SATS;
+const DUST = 546;
 const FEE_PER_KB = ENV.FEE_PER_KB || 150;
 
 const BASE58_RX = /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/;
@@ -242,6 +240,34 @@ class MintError extends Error {
   }
 }
 
+function estimateFeeSats(inputs: number, outputs: number) {
+  const bytes = 10 + 148 * inputs + 34 * outputs;
+  return Math.ceil(bytes / 1000) * FEE_PER_KB;
+}
+
+type MintUtxo = { tx_hash: string; tx_pos: number; value: number };
+
+function selectInputsGreedy(utxos: MintUtxo[], spend: number) {
+  const normalized = utxos
+    .map((u) => ({ ...u, value: Number(u.value) || 0 }))
+    .filter((u) => u.value > 0);
+  const sorted = normalized.sort((a, b) => b.value - a.value);
+  const selected: MintUtxo[] = [];
+  let total = 0;
+
+  for (const utxo of sorted) {
+    selected.push(utxo);
+    total += utxo.value;
+
+    const needed = spend + estimateFeeSats(selected.length, 2) + DUST;
+    if (total >= needed) {
+      break;
+    }
+  }
+
+  return { selected, total };
+}
+
 type PoolRow = {
   id: string;
   symbol: string;
@@ -339,15 +365,12 @@ function buildMintTransaction(params: {
     }
   }
 
-  const feeForCounts = (outputs: number) =>
-    Math.ceil((10 + 148 * inputsCount + 34 * outputs) / 1000) * FEE_PER_KB;
-
-  const minFeeNoChange = feeForCounts(1);
+  const minFeeNoChange = estimateFeeSats(inputsCount, 1);
   if (totalInput < spend + minFeeNoChange) {
     throw new MintError("insufficient_funds");
   }
 
-  const minFeeWithChange = feeForCounts(2);
+  const minFeeWithChange = estimateFeeSats(inputsCount, 2);
   let includeChange = totalInput - spend - minFeeWithChange >= DUST;
   let desiredChange = includeChange ? totalInput - spend - minFeeWithChange : 0;
 
@@ -391,24 +414,11 @@ function buildMintTransaction(params: {
 
     tx.sign(priv);
 
-    let fee: number;
-    try {
-      fee = estimateFee(tx, FEE_PER_KB);
-    } catch {
-      throw new MintError("fee_estimation_failed");
-    }
-
     const raw = tx.serialize(true);
     const bytes = raw.length / 2;
+    const fee = Math.ceil(bytes / 1000) * FEE_PER_KB;
     const finalChange = totalInput - spend - fee;
-    return {
-      tx,
-      raw,
-      bytes,
-      fee,
-      finalChange,
-      wantChange: wantChange && changeValue >= DUST,
-    };
+    return { tx, raw, fee, finalChange, wantChange: wantChange && changeValue >= DUST };
   };
 
   let result = attempt(includeChange, Math.max(0, Math.trunc(desiredChange)));
@@ -466,29 +476,9 @@ function coerceSpendSats(raw: unknown): number | null {
   return null;
 }
 
-type MintQuotePurpose = "quote" | "mint";
-
-type MintQuoteComputation = {
-  pool: PoolRow;
-  priv: bsv.PrivateKey;
-  fromAddress: string;
-  spend: number;
-  fee: number;
-  change: number;
-  tokens: number;
-  selectedInputs: MintUtxo[];
-  totalInput: number;
-  destScript: string;
-  destAddress: string;
-  tx: bsv.Transaction;
-  raw: string;
-  bytes: number;
-};
-
-async function prepareMintQuote(
-  body: Record<string, unknown>,
-  purpose: MintQuotePurpose,
-): Promise<MintQuoteComputation> {
+const mintIdempotency = idempotency();
+const mintHandler = async (req: any, res: any) => {
+  const body = normalizeBody(req.body);
   const wifRaw = getField(body, "wif");
   const spendValueRaw = coerceSpendSats(getField(body, "spendSats"));
   const poolIdRaw = getField(body, "poolId");
@@ -502,95 +492,6 @@ async function prepareMintQuote(
   const spendValue =
     typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
 
-  const priv = parseMintPrivateKey(typeof wifRaw === "string" ? wifRaw : String(wifRaw ?? ""));
-  const fromAddress = priv.toAddress(priv.network).toString();
-
-  if (spendValue === null || spendValue <= 0) {
-    throw new MintError("invalid_spend");
-  }
-
-  const spend = Math.trunc(spendValue);
-  if (spend < DUST) {
-    throw new MintError("dust_output");
-  }
-
-  const poolRow = resolvePoolRow({ poolId, symbol });
-
-  const destScript = poolLockingScriptHex || String(poolRow.locking_script_hex || "").trim();
-  const poolAddress = String(poolRow.pool_address || "").trim();
-  const envPoolAddress = String(ENV.POOL_P2SH_ADDRESS || "").trim();
-
-  const destinationScript = destScript;
-  const destinationAddress = destinationScript ? "" : poolAddress || envPoolAddress;
-
-  if (!destinationScript && !destinationAddress) {
-    throw new MintError("no_pool_destination");
-  }
-
-  const utxos = await fetchUtxos(fromAddress);
-  if (!utxos.length) {
-    throw new MintError("no_funds");
-  }
-
-  const selection = selectUtxos(utxos, spend, FEE_PER_KB, DUST);
-  const { selected, total, fee: selectionFee, change: selectionChange } = selection;
-
-  if (!selected.length || selectionChange < 0 || total < spend + Math.max(selectionFee, 0)) {
-    const code = purpose === "quote" ? "insufficient_funds_for_quote" : "insufficient_funds";
-    throw new MintError(code);
-  }
-
-  const changePreview = selectionChange > 0 ? selectionChange : 0;
-  console.log(
-    `[UTXO] sym=${poolRow.symbol} spend=${spend} feeEst=${selectionFee} change=${changePreview} inputs=${selected.length}`,
-  );
-
-  let built;
-  try {
-    built = buildMintTransaction({
-      priv,
-      fromAddress,
-      spend,
-      selectedInputs: selected,
-      totalInput: total,
-      destScriptHex: destinationScript,
-      destAddress: destinationAddress,
-    });
-  } catch (err: any) {
-    if (purpose === "quote" && err instanceof MintError) {
-      if (err.message === "insufficient_funds_no_change" || err.message === "overspend") {
-        throw new MintError("insufficient_funds_for_quote");
-      }
-    }
-    throw err;
-  }
-
-  const finalChange = built.finalChange > 0 ? built.finalChange : 0;
-  console.log(
-    `[FEE] sym=${poolRow.symbol} spend=${spend} bytes=${built.bytes} fee=${built.fee} change=${finalChange} inputs=${selected.length}`,
-  );
-
-  return {
-    pool: poolRow,
-    priv,
-    fromAddress,
-    spend,
-    fee: built.fee,
-    change: finalChange,
-    tokens: calcTokens(spend),
-    selectedInputs: selected,
-    totalInput: total,
-    destScript: destinationScript,
-    destAddress: destinationAddress,
-    tx: built.tx,
-    raw: built.raw,
-    bytes: built.bytes,
-  };
-}
-
-const mintIdempotency = idempotency();
-const mintHandler = async (req: any, res: any) => {
-  const body = normalizeBody(req.body);
   let selectedInputs: MintUtxo[] = [];
   let destScriptForLog = "";
   let destAddressForLog = "";
@@ -599,29 +500,79 @@ const mintHandler = async (req: any, res: any) => {
   let symbolForLog = "";
 
   try {
-    const prepared = await prepareMintQuote(body, "mint");
-    selectedInputs = prepared.selectedInputs;
-    destScriptForLog = prepared.destScript;
-    destAddressForLog = prepared.destAddress;
-    fromAddr = prepared.fromAddress;
-    poolIdForLog = prepared.pool.id;
-    symbolForLog = prepared.pool.symbol;
+    const priv = parseMintPrivateKey(typeof wifRaw === "string" ? wifRaw : String(wifRaw ?? ""));
+    const fromAddress = priv.toAddress(priv.network).toString();
+    fromAddr = fromAddress;
 
-    const txid = await broadcastRawTx(prepared.raw);
+    if (spendValue === null || spendValue <= 0) {
+      throw new MintError("invalid_spend");
+    }
+
+    const spend = Math.trunc(spendValue);
+    if (spend < DUST) {
+      throw new MintError("dust_output");
+    }
+
+    const poolRow = resolvePoolRow({ poolId, symbol });
+    poolIdForLog = poolRow.id;
+    symbolForLog = poolRow.symbol;
+
+    const destScript = poolLockingScriptHex || String(poolRow.locking_script_hex || "").trim();
+    const poolAddress = String(poolRow.pool_address || "").trim();
+    const envPoolAddress = String(ENV.POOL_P2SH_ADDRESS || "").trim();
+
+    const destinationScript = destScript;
+    const destinationAddress = destinationScript ? "" : poolAddress || envPoolAddress;
+
+    destScriptForLog = destinationScript;
+    destAddressForLog = destinationAddress;
+
+    if (!destinationScript && !destinationAddress) {
+      throw new MintError("no_pool_destination");
+    }
+
+    const utxos = await fetchUtxos(fromAddress);
+    if (!utxos.length) {
+      throw new MintError("no_funds");
+    }
+
+    const selection = selectInputsGreedy(utxos, spend);
+    selectedInputs = selection.selected;
+    const totalInput = selection.total;
+
+    if (!selectedInputs.length) {
+      throw new MintError("insufficient_funds");
+    }
+
+    if (totalInput < spend + estimateFeeSats(selectedInputs.length, 1)) {
+      throw new MintError("insufficient_funds");
+    }
+
+    const txResult = buildMintTransaction({
+      priv,
+      fromAddress,
+      spend,
+      selectedInputs,
+      totalInput,
+      destScriptHex: destinationScript,
+      destAddress: destinationAddress,
+    });
+
+    const txid = await broadcastRawTx(txResult.raw);
     const { visible, attempts } = await waitVisibleNonFatal(txid);
 
-    const guard = db.prepare(`SELECT 1 FROM pools WHERE id=?`).get(prepared.pool.id) as any;
+    const guard = db.prepare(`SELECT 1 FROM pools WHERE id=?`).get(poolRow.id) as any;
     if (!guard) {
       throw new MintError("pool_fk_missing");
     }
 
-    const tokens = prepared.tokens;
+    const tokens = Math.max(0, Math.floor(spend / 1000));
     const existing = db.prepare(`SELECT id FROM mints WHERE txid=?`).get(txid) as any;
     const base = {
       ok: true,
       txid,
-      poolId: prepared.pool.id,
-      symbol: prepared.pool.symbol,
+      poolId: poolRow.id,
+      symbol: poolRow.symbol,
       tokens,
       visible,
       attempts,
@@ -638,7 +589,7 @@ const mintHandler = async (req: any, res: any) => {
       db.prepare(
         `INSERT INTO mints (id, pool_id, symbol, account, spend_sats, tokens, txid, confirmed)
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
-      ).run(id, prepared.pool.id, prepared.pool.symbol, prepared.fromAddress, prepared.spend, tokens, txid);
+      ).run(id, poolRow.id, poolRow.symbol, fromAddress, spend, tokens, txid);
     } catch (err: any) {
       const msg = String(err?.message || err);
       if (msg.includes("FOREIGN KEY")) {
@@ -653,11 +604,11 @@ const mintHandler = async (req: any, res: any) => {
       throw err;
     }
 
-    appendLedger(prepared.pool.id, prepared.fromAddress, prepared.pool.symbol, tokens, "MINT_FILL");
-    refreshSupply(prepared.pool.id, prepared.pool.symbol);
+    appendLedger(poolRow.id, fromAddress, poolRow.symbol, tokens, "MINT_FILL");
+    refreshSupply(poolRow.id, poolRow.symbol);
 
     console.log(
-      `[MINT] success poolId=${prepared.pool.id} symbol=${prepared.pool.symbol} from=${prepared.fromAddress} spendSats=${prepared.spend} txid=${txid}`
+      `[MINT] success poolId=${poolRow.id} symbol=${poolRow.symbol} from=${fromAddress} spendSats=${spend} txid=${txid}`
     );
 
     const out = { ...base, id };
@@ -674,58 +625,6 @@ const mintHandler = async (req: any, res: any) => {
     );
 
     res.status(status).json({ ok: false, error: msg });
-  }
-};
-
-const mintQuoteHandler = async (req: any, res: any) => {
-  const body = normalizeBody(req.body);
-  try {
-    const prepared = await prepareMintQuote(body, "quote");
-
-    console.log(
-      `[QUOTE] sym=${prepared.pool.symbol} spend=${prepared.spend} fee=${prepared.fee} tokens=${prepared.tokens} change=${prepared.change} inputs=${prepared.selectedInputs.length}`,
-    );
-
-    rememberMintQuote({
-      symbol: prepared.pool.symbol,
-      spendSats: prepared.spend,
-      feeEstimate: prepared.fee,
-      changeSats: prepared.change,
-      tokensEstimate: prepared.tokens,
-      inputCount: prepared.selectedInputs.length,
-      fromAddress: prepared.fromAddress,
-      createdAt: Date.now(),
-    });
-
-    const response = {
-      ok: true,
-      symbol: prepared.pool.symbol,
-      spendSats: prepared.spend,
-      feeEstimate: prepared.fee,
-      netSpend: Math.max(0, prepared.spend - prepared.fee),
-      tokensEstimate: prepared.tokens,
-      inputCount: prepared.selectedInputs.length,
-      changeSats: prepared.change,
-      fromAddress: prepared.fromAddress,
-      utxoSummary: prepared.selectedInputs.map((u) => ({
-        txid: u.tx_hash,
-        vout: u.tx_pos,
-        value: u.value,
-      })),
-    };
-
-    return res.json(response);
-  } catch (err: any) {
-    const msg = err instanceof MintError ? err.message : String(err?.message || err);
-    const status = err instanceof MintError ? err.status : msg.startsWith("woc_") ? 502 : 400;
-
-    console.warn(
-      `[WARN] quote_failed symbol=${String(getField(body, "symbol") || "").toString().toUpperCase()} spend=${
-        getField(body, "spendSats") ?? ""
-      } err=${msg}`,
-    );
-
-    return res.status(status).json({ ok: false, error: msg });
   }
 };
 
@@ -809,6 +708,5 @@ r.post("/verify", async (_req, res) => {
 export const buyQuoteRoute = buyQuoteHandler;
 export const buyOrderRoute = [buyOrderIdempotency, buyOrderHandler] as const;
 export const mintRoute = [mintIdempotency, mintHandler] as const;
-export const mintQuoteRoute = mintQuoteHandler;
 
 export default r;

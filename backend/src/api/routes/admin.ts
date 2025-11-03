@@ -2,7 +2,6 @@ import { Router } from "express";
 import { ENV } from "../../lib/env";
 import { db } from "../../lib/db";
 import { flags } from "../../lib/flags";
-import { getRecentMintQuotes } from "../../lib/mintQuoteStore";
 
 const r = Router();
 
@@ -63,16 +62,6 @@ r.get("/debug/db/summary", (_req, res) => {
 r.get("/debug/ping", (_req, res) =>
   res.type("text/plain").send("aftermeta-backend :: pong")
 );
-
-r.get("/debug/quote/:symbol", (req, res) => {
-  try {
-    const symbol = String(req.params.symbol || "").trim();
-    const recentQuotes = getRecentMintQuotes(3, symbol === "*" ? undefined : symbol);
-    res.json({ ok: true, recentQuotes });
-  } catch (e: any) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
 
 r.get("/v1/utxos/:address", async (req, res) => {
   const addr = String(req.params.address || "").trim();
