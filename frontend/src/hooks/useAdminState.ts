@@ -1,33 +1,37 @@
-import { useEffect, useState } from 'react'
-import { adminState, type AdminState as AdminStateType } from '@/lib/api'
+import { useEffect, useState } from "react";
+import { adminState as fetchAdminState, type AdminState as AdminStateType } from "@/lib/api";
 
+export type AdminState = AdminStateType;
 
-export type AdminState = AdminStateType
+type State = {
+  data: AdminState | null;
+  error: string | null;
+};
 
+export function useAdminState(intervalMs = 5_000) {
+  const [state, setState] = useState<State>({ data: null, error: null });
 
-export function useAdminState(intervalMs = 5000) {
-const [data, setData] = useState<AdminState | null>(null)
-const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    let alive = true;
 
+    async function tick() {
+      try {
+        const res = await fetchAdminState();
+        if (!alive) return;
+        setState({ data: res, error: null });
+      } catch (err: any) {
+        if (!alive) return;
+        setState((prev) => ({ data: prev.data, error: String(err?.message ?? err) }));
+      }
+    }
 
-useEffect(() => {
-let alive = true
-async function tick() {
-try {
-const res = await adminState()
-if (!alive) return
-setData(res)
-setError(null)
-} catch (e: any) {
-if (!alive) return
-setError(String(e?.message || e))
-}
-}
-tick()
-const id = setInterval(tick, intervalMs)
-return () => { alive = false; clearInterval(id) }
-}, [intervalMs])
+    tick();
+    const id = setInterval(tick, intervalMs);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [intervalMs]);
 
-
-return { data, error }
+  return state;
 }
