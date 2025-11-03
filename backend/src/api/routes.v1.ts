@@ -656,32 +656,26 @@ function coerceSpendSats(raw: unknown): number | null {
 
 // ----------------------------- MINT (REAL + hardened WOC) -----------------------------
 r.post("/v1/mint", idempotency(), async (req, res) => {
-  const body = normalizeBody(req.body);
-  const wifRaw = getField(body, "wif");
-  const spendValueRaw = coerceSpendSats(getField(body, "spendSats"));
-  const poolIdRaw = getField(body, "poolId");
-  const symbolRaw = getField(body, "symbol");
-  const poolLockingScriptHexRaw = getField(body, "poolLockingScriptHex");
-
-  const poolId = typeof poolIdRaw === "string" ? poolIdRaw.trim() : undefined;
-  const symbol = typeof symbolRaw === "string" ? symbolRaw.trim() : undefined;
-  const poolLockingScriptHex =
-    typeof poolLockingScriptHexRaw === "string" ? poolLockingScriptHexRaw.trim() : "";
-  const spendValue =
-    typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
-
-  let selectedInputs: MintUtxo[] = [];
-  let destScriptForLog = "";
-  let destAddressForLog = "";
-  let fromAddr = "";
-  let poolIdForLog = "";
-  let symbolForLog = "";
-
   try {
-    const priv = parseMintPrivateKey(typeof wifRaw === "string" ? wifRaw : String(wifRaw ?? ""));
-    const fromAddress = priv.toAddress(priv.network).toString();
-    fromAddr = fromAddress;
+    const body = normalizeBody(req.body);
+    const wifRaw = getField(body, "wif");
+    const wif = typeof wifRaw === "string" ? wifRaw.trim() : "";
+    const spendValueRaw = coerceSpendSats(getField(body, "spendSats"));
+    const spendValue =
+      typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
+    const poolIdRaw = getField(body, "poolId");
+    const symbolRaw = getField(body, "symbol");
+    const poolLockingScriptHexRaw = getField(body, "poolLockingScriptHex");
+    const poolId = typeof poolIdRaw === "string" ? poolIdRaw.trim() : undefined;
+    const symbol = typeof symbolRaw === "string" ? symbolRaw.trim() : undefined;
+    const poolLockingScriptHex =
+      typeof poolLockingScriptHexRaw === "string"
+        ? poolLockingScriptHexRaw.trim()
+        : undefined;
 
+    if (!wif) {
+      return res.status(400).json({ ok: false, error: "missing_wif" });
+    }
     if (spendValue === null || spendValue <= 0) {
       throw new MintError("invalid_spend");
     }
@@ -695,9 +689,11 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     poolIdForLog = poolRow.id;
     symbolForLog = poolRow.symbol;
 
-    const destScript = poolLockingScriptHex || String(poolRow.locking_script_hex || "").trim();
-    const poolAddress = String(poolRow.pool_address || "").trim();
-    const envPoolAddress = String(ENV.POOL_P2SH_ADDRESS || "").trim();
+    // Wallet + UTXOs
+    const priv = bsv.PrivateKey.fromWIF(wif);
+    const fromAddr = priv.toAddress(NET_BSV).toString();
+    const utxos = await fetchUtxos(fromAddr);
+    if (!utxos.length) throw new Error("no_funds");
 
     const destinationScript = destScript;
     const destinationAddress = destinationScript ? "" : poolAddress || envPoolAddress;
@@ -782,27 +778,18 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
       throw err;
     }
 
-    appendLedger(poolRow.id, fromAddress, poolRow.symbol, tokens, "MINT_FILL");
-    refreshSupply(poolRow.id, poolRow.symbol);
+    appendLedger(pid, fromAddr, symUpper, tokens, "MINT_FILL");
+    refreshSupply(pid, symUpper);
 
-    console.log(
-      `[MINT] success poolId=${poolRow.id} symbol=${poolRow.symbol} from=${fromAddress} spendSats=${spend} txid=${txid}`
-    );
-
-    const out = { ...base, id };
-    persistResult(req, out, "MINT_REAL", body);
-    return res.json(out);
-  } catch (err: any) {
-    const msg = err instanceof MintError ? err.message : String(err?.message || err);
-    const status = err instanceof MintError ? err.status : msg.startsWith("woc_") ? 502 : 400;
-
-    console.error(
-      `[MINT] fail poolId=${poolIdForLog || ""} symbol=${symbolForLog || ""} destScript=${
-        destScriptForLog ? destScriptForLog.slice(0, 64) : ""
-      } destAddr=${destAddressForLog || ""} inputs=${selectedInputs.length} from=${fromAddr} err=${msg}`
-    );
-
-    res.status(status).json({ ok: false, error: msg });
+    const out = { ok: true, txid, poolId: pid, symbol: symUpper, id, tokens, visible, attempts };
+    persistResult(req, out, "MINT_REAL", req.body);
+    res.json(out);
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    if (msg.includes("FOREIGN KEY")) {
+      return res.status(400).json({ ok: false, error: "pool_fk_missing" });
+    }
+    res.status(400).json({ ok: false, error: msg });
   }
 });
 

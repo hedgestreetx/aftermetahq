@@ -8,7 +8,6 @@
 **/build/
 
 # Ignore database + envs
-*.db
 .env
 .env.*
 
