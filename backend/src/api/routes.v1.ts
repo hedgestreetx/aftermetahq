@@ -461,19 +461,6 @@ function coerceSpendSats(raw: unknown): number | null {
 
 // ----------------------------- MINT (REAL + hardened WOC) -----------------------------
 r.post("/v1/mint", idempotency(), async (req, res) => {
-  console.log("req.body =", req.body);
-  const {
-    wif,
-    spendSats,
-    poolId,
-    symbol,
-    poolLockingScriptHex,
-  } = (req.body ?? {}) as Record<string, unknown>;
-
-  if (!wif) {
-    return res.status(400).json({ ok: false, error: "missing_wif" });
-  }
-
   try {
     const body = normalizeBody(req.body);
     const wifRaw = getField(body, "wif");
@@ -484,10 +471,12 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     const poolIdRaw = getField(body, "poolId");
     const symbolRaw = getField(body, "symbol");
     const poolLockingScriptHexRaw = getField(body, "poolLockingScriptHex");
-    const poolId = typeof poolIdRaw === "string" ? poolIdRaw : undefined;
-    const symbol = typeof symbolRaw === "string" ? symbolRaw : undefined;
+    const poolId = typeof poolIdRaw === "string" ? poolIdRaw.trim() : undefined;
+    const symbol = typeof symbolRaw === "string" ? symbolRaw.trim() : undefined;
     const poolLockingScriptHex =
-      typeof poolLockingScriptHexRaw === "string" ? poolLockingScriptHexRaw : undefined;
+      typeof poolLockingScriptHexRaw === "string"
+        ? poolLockingScriptHexRaw.trim()
+        : undefined;
 
     if (!wif) {
       return res.status(400).json({ ok: false, error: "missing_wif" });
@@ -601,7 +590,7 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
       throw err;
     }
 
-    appendLedger(pid, fromAddr, symUpper, tokens, "MINT_FILL", txid);
+    appendLedger(pid, fromAddr, symUpper, tokens, "MINT_FILL");
     refreshSupply(pid, symUpper);
 
     const out = { ok: true, txid, poolId: pid, symbol: symUpper, id, tokens, visible, attempts };
