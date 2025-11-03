@@ -2,6 +2,7 @@ import { Router } from "express";
 import { ENV } from "../../lib/env";
 import { db } from "../../lib/db";
 import { flags } from "../../lib/flags";
+import { recentQuotes } from "../../lib/quoteStore";
 
 const r = Router();
 
@@ -53,6 +54,29 @@ r.get("/debug/db/summary", (_req, res) => {
       counts: { pools: Number(pools?.c || 0), mints: Number(mints?.c || 0) },
       lastPool: lastPool || null,
       lastMint: lastMint || null,
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+r.get("/debug/quote/:symbol", (req, res) => {
+  try {
+    const symbol = String(req.params.symbol || "").trim();
+    const quotes = recentQuotes(symbol, 3);
+    res.json({
+      ok: true,
+      recentQuotes: quotes.map((q) => ({
+        symbol: q.symbol,
+        spendSats: q.spendSats,
+        feeEstimate: q.feeEstimate,
+        netSpend: q.netSpend,
+        tokensEstimate: q.tokensEstimate,
+        inputCount: q.inputCount,
+        changeSats: q.changeSats,
+        fromAddress: q.fromAddress,
+        createdAt: q.createdAt,
+      })),
     });
   } catch (e: any) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });

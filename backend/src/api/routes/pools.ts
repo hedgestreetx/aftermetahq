@@ -22,21 +22,29 @@ r.post("/", idempotency(), (req, res) => {
   const poolAddress = hasAddr ? String(p.poolAddress).trim() : "";
   const lockingScriptHex = hasScript ? String(p.lockingScriptHex).trim() : "";
 
-  db.prepare(
-    `INSERT OR REPLACE INTO pools
-     (id, symbol, creator, pool_address, locking_script_hex, max_supply, decimals, creator_reserve, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    id,
-    symbol,
-    creator,
-    poolAddress,
-    lockingScriptHex,
-    Number(p.maxSupply ?? 0),
-    Number(p.decimals ?? 0),
-    Number(p.creatorReserve ?? 0),
-    createdAt
-  );
+  try {
+    db.prepare(
+      `INSERT INTO pools
+       (id, symbol, creator, pool_address, locking_script_hex, max_supply, decimals, creator_reserve, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      id,
+      symbol,
+      creator,
+      poolAddress,
+      lockingScriptHex,
+      Number(p.maxSupply ?? 0),
+      Number(p.decimals ?? 0),
+      Number(p.creatorReserve ?? 0),
+      createdAt
+    );
+  } catch (err: any) {
+    const message = String(err?.message || err);
+    if (message.includes("UNIQUE")) {
+      return res.status(409).json({ ok: false, error: "pool_already_exists" });
+    }
+    return res.status(500).json({ ok: false, error: message });
+  }
 
   db.prepare(`INSERT OR IGNORE INTO pool_supply(pool_id, minted_supply) VALUES(?, 0)`).run(id);
 
