@@ -5,6 +5,8 @@ import { bsv } from "scrypt-ts";
 import { db } from "../../lib/db";
 import { ENV } from "../../lib/env";
 import { appendLedger, refreshSupply } from "../../lib/ledger";
+import { calcTokens, DUST_SATS, estimateFee, MintUtxo, selectUtxos } from "../../lib/txutil";
+import { recordQuote } from "../../lib/quoteStore";
 import { idempotency, persistResult } from "../idempotency";
 
 const r = Router();
@@ -12,11 +14,12 @@ const r = Router();
 const clamp = (n: number, lo: number, hi: number) =>
   Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : lo;
 
-const DUST = 546;
+const DUST = DUST_SATS;
 const FEE_PER_KB = ENV.FEE_PER_KB || 150;
 
 const BASE58_RX = /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/;
 const NET_WOC = ENV.NETWORK === "mainnet" ? "main" : "test"; // WOC URL segment
+const WOC_ROOT = ENV.WOC_BASE || `https://api.whatsonchain.com/v1/bsv/${NET_WOC}`;
 
 const nowMs = () => Date.now();
 const isTxid = (s: string) => typeof s === "string" && /^[0-9a-fA-F]{64}$/.test(s);
@@ -183,20 +186,18 @@ const buyOrderHandler = (req: any, res: any) => {
   }
 };
 
-async function fetchUtxos(address: string) {
-  const url = `https://api.whatsonchain.com/v1/bsv/${NET_WOC}/address/${address}/unspent`;
-  const r2 = await fetch(url);
-  if (!r2.ok) throw new Error(`woc_utxos_http_${r2.status} ${await r2.text()}`);
-  return r2.json() as Promise<Array<{ tx_hash: string; tx_pos: number; value: number }>>;
-}
-
 async function broadcastRawTx(raw: string) {
-  const url = `https://api.whatsonchain.com/v1/bsv/${NET_WOC}/tx/raw`;
-  const r2 = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ txhex: raw }),
-  });
+  const url = `${WOC_ROOT}/tx/raw`;
+  let r2: any;
+  try {
+    r2 = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ txhex: raw }),
+    });
+  } catch (err: any) {
+    throw new Error(`woc_broadcast_network_${String(err?.message || err)}`);
+  }
   const text = (await r2.text()).trim();
   if (!r2.ok) throw new Error(`woc_broadcast_http_${r2.status} ${text}`);
   const txid = text.replace(/^"+|"+$/g, "");
@@ -206,7 +207,7 @@ async function broadcastRawTx(raw: string) {
 
 async function wocVisibleOnce(txid: string): Promise<"yes" | "no" | "err"> {
   try {
-    const r = await fetch(`https://api.whatsonchain.com/v1/bsv/${NET_WOC}/tx/hash/${txid}`);
+    const r = await fetch(`${WOC_ROOT}/tx/hash/${txid}`);
     if (r.status === 200) return "yes";
     if (r.status === 404) return "no";
     return "err";
@@ -238,34 +239,6 @@ class MintError extends Error {
     super(code);
     this.status = status;
   }
-}
-
-function estimateFeeSats(inputs: number, outputs: number) {
-  const bytes = 10 + 148 * inputs + 34 * outputs;
-  return Math.ceil(bytes / 1000) * FEE_PER_KB;
-}
-
-type MintUtxo = { tx_hash: string; tx_pos: number; value: number };
-
-function selectInputsGreedy(utxos: MintUtxo[], spend: number) {
-  const normalized = utxos
-    .map((u) => ({ ...u, value: Number(u.value) || 0 }))
-    .filter((u) => u.value > 0);
-  const sorted = normalized.sort((a, b) => b.value - a.value);
-  const selected: MintUtxo[] = [];
-  let total = 0;
-
-  for (const utxo of sorted) {
-    selected.push(utxo);
-    total += utxo.value;
-
-    const needed = spend + estimateFeeSats(selected.length, 2) + DUST;
-    if (total >= needed) {
-      break;
-    }
-  }
-
-  return { selected, total };
 }
 
 type PoolRow = {
@@ -333,57 +306,111 @@ function parseMintPrivateKey(wif: string) {
   return priv;
 }
 
-function buildMintTransaction(params: {
+type QuoteComputation = {
   priv: bsv.PrivateKey;
   fromAddress: string;
+  pool: PoolRow;
   spend: number;
+  tokens: number;
   selectedInputs: MintUtxo[];
   totalInput: number;
-  destScriptHex?: string;
-  destAddress?: string;
-}) {
-  const { priv, fromAddress, spend, selectedInputs, totalInput } = params;
-  const destScriptHex = String(params.destScriptHex || "").trim();
-  const destAddress = String(params.destAddress || "").trim();
-  const inputsCount = selectedInputs.length;
+  fee: number;
+  change: number;
+  tx: bsv.Transaction;
+  raw: string;
+  bytes: number;
+  destinationScript: string;
+  destinationAddress: string;
+};
 
-  if (!inputsCount) {
-    throw new MintError("insufficient_funds");
+async function computeMintQuote(params: {
+  wif: string;
+  spendSats: number;
+  poolId?: string;
+  symbol?: string;
+  poolLockingScriptHex?: string;
+  context: "quote" | "mint";
+}): Promise<QuoteComputation> {
+  const { wif, spendSats, poolId, symbol, poolLockingScriptHex, context } = params;
+
+  const priv = parseMintPrivateKey(wif);
+  const fromAddress = priv.toAddress(priv.network).toString();
+
+  if (!Number.isFinite(spendSats) || spendSats <= 0) {
+    throw new MintError("invalid_spend");
   }
 
-  const hasScript = destScriptHex.length > 0;
-  if (!hasScript && !destAddress) {
+  const spend = Math.trunc(spendSats);
+  if (spend < DUST) {
+    throw new MintError("dust_output");
+  }
+
+  const poolRow = resolvePoolRow({ poolId, symbol });
+  const destinationScript = (poolLockingScriptHex || poolRow.locking_script_hex || "").trim();
+  const poolAddress = String(poolRow.pool_address || "").trim();
+  const fallbackAddress = String(ENV.POOL_P2SH_ADDRESS || "").trim();
+  const destinationAddress = destinationScript ? "" : poolAddress || fallbackAddress;
+
+  if (!destinationScript && !destinationAddress) {
     throw new MintError("no_pool_destination");
   }
 
   let poolScript: bsv.Script | null = null;
-  if (hasScript) {
+  if (destinationScript) {
     try {
-      poolScript = bsv.Script.fromHex(destScriptHex);
-    } catch {
+      poolScript = bsv.Script.fromHex(destinationScript);
+    } catch (err) {
+      console.warn(
+        `[WARN] sym=${poolRow.symbol} spend=${spend} ctx=${context} err=invalid_pool_script`
+      );
       throw new MintError("no_pool_destination");
     }
   }
 
-  const minFeeNoChange = estimateFeeSats(inputsCount, 1);
-  if (totalInput < spend + minFeeNoChange) {
-    throw new MintError("insufficient_funds");
+  const utxoUrl = `${WOC_ROOT}/address/${fromAddress}/unspent`;
+  let utxosResp: any;
+  try {
+    utxosResp = await fetch(utxoUrl);
+  } catch (err: any) {
+    console.warn(
+      `[WARN] sym=${poolRow.symbol} spend=${spend} ctx=${context} err=woc_utxos_network_${String(
+        err?.message || err,
+      )}`,
+    );
+    throw new MintError("woc_utxos_network");
+  }
+  if (!utxosResp.ok) {
+    const text = (await utxosResp.text().catch(() => "")) || "";
+    console.warn(
+      `[WARN] sym=${poolRow.symbol} spend=${spend} ctx=${context} err=woc_utxos_http_${utxosResp.status} body=${text.slice(
+        0,
+        120,
+      )}`,
+    );
+    throw new MintError(`woc_utxos_http_${utxosResp.status}`);
+  }
+  const utxos = (await utxosResp.json()) as MintUtxo[];
+
+  const selection = selectUtxos(utxos, spend, FEE_PER_KB, DUST);
+  const { selected, total, change: provisionalChange } = selection;
+
+  console.log(
+    `[UTXO] sym=${poolRow.symbol} spend=${spend} selected=${selected.length} total=${total} change=${provisionalChange}`,
+  );
+
+  if (!selected.length || total < spend) {
+    throw new MintError("insufficient_funds_for_quote");
   }
 
-  const minFeeWithChange = estimateFeeSats(inputsCount, 2);
-  let includeChange = totalInput - spend - minFeeWithChange >= DUST;
-  let desiredChange = includeChange ? totalInput - spend - minFeeWithChange : 0;
-
-  if (includeChange && desiredChange < DUST) {
-    includeChange = false;
-    desiredChange = 0;
+  if (provisionalChange < 0) {
+    throw new MintError("insufficient_funds_for_quote");
   }
 
   const changeScript = bsv.Script.buildPublicKeyHashOut(fromAddress);
 
-  const attempt = (wantChange: boolean, changeValue: number) => {
+  const buildTx = (changeValue: number, includeChange: boolean) => {
     const tx = new bsv.Transaction();
-    for (const utxo of selectedInputs) {
+    for (const utxo of selected) {
       tx.from({
         txId: utxo.tx_hash,
         outputIndex: utxo.tx_pos,
@@ -400,10 +427,10 @@ function buildMintTransaction(params: {
         })
       );
     } else {
-      tx.to(destAddress, spend);
+      tx.to(destinationAddress, spend);
     }
 
-    if (wantChange && changeValue >= DUST) {
+    if (includeChange && changeValue >= DUST) {
       tx.addOutput(
         new bsv.Transaction.Output({
           script: changeScript,
@@ -413,49 +440,94 @@ function buildMintTransaction(params: {
     }
 
     tx.sign(priv);
-
-    const raw = tx.serialize(true);
-    const bytes = raw.length / 2;
-    const fee = Math.ceil(bytes / 1000) * FEE_PER_KB;
-    const finalChange = totalInput - spend - fee;
-    return { tx, raw, fee, finalChange, wantChange: wantChange && changeValue >= DUST };
+    return tx;
   };
 
-  let result = attempt(includeChange, Math.max(0, Math.trunc(desiredChange)));
-  if (result.finalChange < 0) {
-    throw new MintError("overspend");
-  }
+  let includeChange = provisionalChange >= DUST;
+  let changeValue = includeChange ? Math.trunc(provisionalChange) : 0;
+  let tx: bsv.Transaction | null = null;
+  let raw = "";
+  let bytes = 0;
+  let fee = 0;
+  let finalChange = includeChange ? changeValue : 0;
 
-  if (result.wantChange) {
-    if (result.finalChange < DUST) {
-      if (totalInput < spend + minFeeNoChange) {
-        throw new MintError("insufficient_funds_no_change");
-      }
-      result = attempt(false, 0);
-      if (result.finalChange < 0) {
-        throw new MintError("overspend");
-      }
-    } else if (result.finalChange !== Math.trunc(desiredChange)) {
-      result = attempt(true, result.finalChange);
-      if (result.finalChange < DUST) {
-        if (totalInput < spend + minFeeNoChange) {
-          throw new MintError("insufficient_funds_no_change");
-        }
-        result = attempt(false, 0);
-        if (result.finalChange < 0) {
-          throw new MintError("overspend");
-        }
-      }
+  for (let attempt = 0; attempt < 6; attempt++) {
+    tx = buildTx(changeValue, includeChange);
+
+    try {
+      raw = tx.serialize(true);
+      bytes = raw.length / 2;
+    } catch {
+      throw new MintError("fee_estimation_failed");
     }
-  }
 
-  for (const out of result.tx.outputs) {
-    if (out.satoshis > 0 && out.satoshis < DUST) {
-      throw new MintError("dust_change");
+    try {
+      fee = estimateFee(tx, FEE_PER_KB);
+    } catch {
+      throw new MintError("fee_estimation_failed");
     }
+
+    finalChange = total - spend - fee;
+
+    if (finalChange < 0) {
+      if (!includeChange) {
+        throw new MintError("insufficient_funds_for_quote");
+      }
+      includeChange = false;
+      changeValue = 0;
+      continue;
+    }
+
+    if (includeChange) {
+      if (finalChange < DUST) {
+        includeChange = false;
+        changeValue = 0;
+        continue;
+      }
+      if (finalChange !== changeValue) {
+        changeValue = Math.trunc(finalChange);
+        continue;
+      }
+    } else if (finalChange >= DUST) {
+      includeChange = true;
+      changeValue = Math.trunc(finalChange);
+      continue;
+    }
+
+    break;
   }
 
-  return result;
+  if (!tx || !raw) {
+    throw new MintError("fee_estimation_failed");
+  }
+
+  const changeSats = includeChange ? finalChange : 0;
+  if (changeSats > 0 && changeSats < DUST) {
+    throw new MintError("dust_change");
+  }
+
+  console.log(
+    `[FEE] sym=${poolRow.symbol} spend=${spend} fee=${fee} bytes=${bytes} inputs=${selected.length} change=${changeSats}`,
+  );
+
+  const tokens = calcTokens(spend);
+
+  return {
+    priv,
+    fromAddress,
+    pool: poolRow,
+    spend,
+    tokens,
+    selectedInputs: selected,
+    totalInput: total,
+    fee,
+    change: changeSats,
+    tx,
+    raw,
+    bytes,
+    destinationScript,
+    destinationAddress,
+  };
 }
 
 function coerceSpendSats(raw: unknown): number | null {
@@ -475,6 +547,84 @@ function coerceSpendSats(raw: unknown): number | null {
   }
   return null;
 }
+
+const quoteMintHandler = async (req: any, res: any) => {
+  const body = normalizeBody(req.body);
+  const wifRaw = getField(body, "wif");
+  const spendValueRaw = coerceSpendSats(getField(body, "spendSats"));
+  const poolIdRaw = getField(body, "poolId");
+  const symbolRaw = getField(body, "symbol");
+  const poolLockingScriptHexRaw = getField(body, "poolLockingScriptHex");
+
+  const poolId = typeof poolIdRaw === "string" ? poolIdRaw.trim() : undefined;
+  const symbol = typeof symbolRaw === "string" ? symbolRaw.trim() : undefined;
+  const poolLockingScriptHex =
+    typeof poolLockingScriptHexRaw === "string" ? poolLockingScriptHexRaw.trim() : "";
+  const spendValue =
+    typeof spendValueRaw === "number" && Number.isFinite(spendValueRaw) ? spendValueRaw : null;
+
+  try {
+    const wif = typeof wifRaw === "string" ? wifRaw : String(wifRaw ?? "");
+    if (spendValue === null) {
+      throw new MintError("invalid_spend");
+    }
+
+    const quote = await computeMintQuote({
+      wif,
+      spendSats: spendValue,
+      poolId,
+      symbol,
+      poolLockingScriptHex,
+      context: "quote",
+    });
+
+    const netSpend = Math.max(0, quote.spend - quote.fee);
+    const response = {
+      ok: true,
+      symbol: quote.pool.symbol,
+      spendSats: quote.spend,
+      feeEstimate: quote.fee,
+      netSpend,
+      tokensEstimate: quote.tokens,
+      inputCount: quote.selectedInputs.length,
+      changeSats: quote.change,
+      fromAddress: quote.fromAddress,
+      utxoSummary: quote.selectedInputs.map((u) => ({
+        txid: u.tx_hash,
+        vout: u.tx_pos,
+        value: u.value,
+      })),
+    };
+
+    console.log(
+      `[QUOTE] sym=${quote.pool.symbol} spend=${quote.spend} fee=${quote.fee} tokens=${quote.tokens} change=${quote.change} inputs=${quote.selectedInputs.length}`,
+    );
+
+    recordQuote({
+      symbol: quote.pool.symbol,
+      spendSats: quote.spend,
+      feeEstimate: quote.fee,
+      netSpend,
+      tokensEstimate: quote.tokens,
+      inputCount: quote.selectedInputs.length,
+      changeSats: quote.change,
+      fromAddress: quote.fromAddress,
+    });
+
+    res.json(response);
+  } catch (err: any) {
+    const msg = err instanceof MintError ? err.message : String(err?.message || err);
+    const status = err instanceof MintError ? (msg.startsWith("woc_") ? 502 : 400) : 400;
+
+    console.warn(
+      `[WARN] sym=${typeof symbol === "string" ? symbol : ""} spend=${
+        spendValue ?? 0
+      } ctx=quote err=${msg}`,
+    );
+
+    res.status(status).json({ ok: false, error: msg });
+  }
+};
 
 const mintIdempotency = idempotency();
 const mintHandler = async (req: any, res: any) => {
@@ -500,79 +650,42 @@ const mintHandler = async (req: any, res: any) => {
   let symbolForLog = "";
 
   try {
-    const priv = parseMintPrivateKey(typeof wifRaw === "string" ? wifRaw : String(wifRaw ?? ""));
-    const fromAddress = priv.toAddress(priv.network).toString();
-    fromAddr = fromAddress;
-
-    if (spendValue === null || spendValue <= 0) {
+    if (spendValue === null) {
       throw new MintError("invalid_spend");
     }
 
-    const spend = Math.trunc(spendValue);
-    if (spend < DUST) {
-      throw new MintError("dust_output");
-    }
-
-    const poolRow = resolvePoolRow({ poolId, symbol });
-    poolIdForLog = poolRow.id;
-    symbolForLog = poolRow.symbol;
-
-    const destScript = poolLockingScriptHex || String(poolRow.locking_script_hex || "").trim();
-    const poolAddress = String(poolRow.pool_address || "").trim();
-    const envPoolAddress = String(ENV.POOL_P2SH_ADDRESS || "").trim();
-
-    const destinationScript = destScript;
-    const destinationAddress = destinationScript ? "" : poolAddress || envPoolAddress;
-
-    destScriptForLog = destinationScript;
-    destAddressForLog = destinationAddress;
-
-    if (!destinationScript && !destinationAddress) {
-      throw new MintError("no_pool_destination");
-    }
-
-    const utxos = await fetchUtxos(fromAddress);
-    if (!utxos.length) {
-      throw new MintError("no_funds");
-    }
-
-    const selection = selectInputsGreedy(utxos, spend);
-    selectedInputs = selection.selected;
-    const totalInput = selection.total;
-
-    if (!selectedInputs.length) {
-      throw new MintError("insufficient_funds");
-    }
-
-    if (totalInput < spend + estimateFeeSats(selectedInputs.length, 1)) {
-      throw new MintError("insufficient_funds");
-    }
-
-    const txResult = buildMintTransaction({
-      priv,
-      fromAddress,
-      spend,
-      selectedInputs,
-      totalInput,
-      destScriptHex: destinationScript,
-      destAddress: destinationAddress,
+    const wif = typeof wifRaw === "string" ? wifRaw : String(wifRaw ?? "");
+    const quote = await computeMintQuote({
+      wif,
+      spendSats: spendValue,
+      poolId,
+      symbol,
+      poolLockingScriptHex,
+      context: "mint",
     });
 
-    const txid = await broadcastRawTx(txResult.raw);
+    selectedInputs = quote.selectedInputs;
+    destScriptForLog = quote.destinationScript;
+    destAddressForLog = quote.destinationAddress;
+    fromAddr = quote.fromAddress;
+    poolIdForLog = quote.pool.id;
+    symbolForLog = quote.pool.symbol;
+
+    const txid = await broadcastRawTx(quote.raw);
     const { visible, attempts } = await waitVisibleNonFatal(txid);
 
-    const guard = db.prepare(`SELECT 1 FROM pools WHERE id=?`).get(poolRow.id) as any;
+    const guard = db.prepare(`SELECT 1 FROM pools WHERE id=?`).get(quote.pool.id) as any;
     if (!guard) {
       throw new MintError("pool_fk_missing");
     }
 
-    const tokens = Math.max(0, Math.floor(spend / 1000));
+    const tokens = quote.tokens;
     const existing = db.prepare(`SELECT id FROM mints WHERE txid=?`).get(txid) as any;
     const base = {
       ok: true,
       txid,
-      poolId: poolRow.id,
-      symbol: poolRow.symbol,
+      poolId: quote.pool.id,
+      symbol: quote.pool.symbol,
       tokens,
       visible,
       attempts,
@@ -589,7 +702,7 @@ const mintHandler = async (req: any, res: any) => {
       db.prepare(
         `INSERT INTO mints (id, pool_id, symbol, account, spend_sats, tokens, txid, confirmed)
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
-      ).run(id, poolRow.id, poolRow.symbol, fromAddress, spend, tokens, txid);
+      ).run(id, quote.pool.id, quote.pool.symbol, quote.fromAddress, quote.spend, tokens, txid);
     } catch (err: any) {
       const msg = String(err?.message || err);
       if (msg.includes("FOREIGN KEY")) {
@@ -604,11 +717,11 @@ const mintHandler = async (req: any, res: any) => {
       throw err;
     }
 
-    appendLedger(poolRow.id, fromAddress, poolRow.symbol, tokens, "MINT_FILL");
-    refreshSupply(poolRow.id, poolRow.symbol);
+    appendLedger(quote.pool.id, quote.fromAddress, quote.pool.symbol, tokens, "MINT_FILL");
+    refreshSupply(quote.pool.id, quote.pool.symbol);
 
     console.log(
-      `[MINT] success poolId=${poolRow.id} symbol=${poolRow.symbol} from=${fromAddress} spendSats=${spend} txid=${txid}`
+      `[MINT] success poolId=${quote.pool.id} symbol=${quote.pool.symbol} from=${quote.fromAddress} spendSats=${quote.spend} fee=${quote.fee} txid=${txid}`,
     );
 
     const out = { ...base, id };
@@ -707,6 +820,7 @@ r.post("/verify", async (_req, res) => {
 
 export const buyQuoteRoute = buyQuoteHandler;
 export const buyOrderRoute = [buyOrderIdempotency, buyOrderHandler] as const;
+export const mintQuoteRoute = quoteMintHandler;
 export const mintRoute = [mintIdempotency, mintHandler] as const;
 
 export default r;

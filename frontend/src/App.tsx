@@ -1,142 +1,188 @@
-import { useEffect, useState } from "react";
-import AdminStatus from "@/components/AdminStatus";
+import { useEffect, useMemo, useState } from "react";
+import MintPanel from "@/components/MintPanel";
 import PoolList from "@/components/PoolList";
-import MintTokenForm from "@/components/MintTokenForm";
 import AdminPanel from "@/components/AdminPanel";
-import { health, listMints, type MintRow, type Pool } from "@/lib/api";
+import { API_BASE, health, listMints, type MintRow, type Pool } from "@/lib/api";
+import { useAdminState } from "@/hooks/useAdminState";
 
 export default function App() {
-  const [svc, setSvc] = useState<string>("");   // backend service name
-  const [err, setErr] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Pool | null>(null);
+  const [serviceName, setServiceName] = useState<string>("");
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [selectedPool, setSelectedPool] = useState<Pool | null>(null);
   const [mints, setMints] = useState<MintRow[]>([]);
-
-  async function loadHealth() {
-    try {
-      const h = await health();
-      setSvc(h.service);
-      setErr(null);
-    } catch (e: any) {
-      setErr(String(e?.message || e));
-    }
-  }
-
-  async function loadMints() {
-    try {
-      const r = await listMints({ limit: 50 });
-      setMints(r.mints);
-    } catch (e) {
-      console.error("loadMints error:", e);
-    }
-  }
+  const [loadingMints, setLoadingMints] = useState(false);
+  const { data: admin, error: adminError } = useAdminState();
 
   useEffect(() => {
+    async function loadHealth() {
+      try {
+        const res = await health();
+        setServiceName(res.service);
+        setHealthError(null);
+      } catch (err: any) {
+        setHealthError(String(err?.message ?? err));
+      }
+    }
     loadHealth();
-    loadMints();
-    const id = setInterval(loadMints, 5000);
-    return () => clearInterval(id);
   }, []);
+
+  const apiDown = Boolean(adminError && !admin);
+
+  const network = admin?.network ?? "testnet";
+
+  const loadMints = async () => {
+    try {
+      setLoadingMints(true);
+      const res = await listMints(selectedPool ? { poolId: selectedPool.id, limit: 25 } : { limit: 25 });
+      setMints(res.mints);
+    } catch (err) {
+      console.error("Failed to load mints", err);
+    } finally {
+      setLoadingMints(false);
+    }
+  };
+
+  useEffect(() => {
+    loadMints();
+    const id = setInterval(loadMints, 10_000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPool?.id]);
+
+  const adminBanner = useMemo(() => {
+    if (apiDown) {
+      return (
+        <div className="card" role="alert">
+          <div className="h" style={{ justifyContent: "space-between" }}>
+            <strong>API DOWN</strong>
+            <span className="small">{adminError}</span>
+          </div>
+          <div className="small" style={{ marginTop: 6 }}>
+            Check that {API_BASE} is reachable and the backend is running.
+          </div>
+        </div>
+      );
+    }
+
+    if (!admin) {
+      return (
+        <div className="card">
+          <div className="small">Loading admin state…</div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="card">
+        <div className="h" style={{ justifyContent: "space-between" }}>
+          <div className="h" style={{ gap: 12 }}>
+            <span className="badge">API</span>
+            <strong>{API_BASE}</strong>
+          </div>
+          <div className="h" style={{ gap: 16 }}>
+            <span className="small">Network:</span>
+            <strong>{admin.network}</strong>
+            <span className="small">Fee/KB:</span>
+            <strong>{admin.feePerKb}</strong>
+            <span className="small">minConfs:</span>
+            <strong>{admin.minConfs}</strong>
+          </div>
+        </div>
+      </div>
+    );
+  }, [admin, apiDown, adminError]);
 
   return (
     <div className="container">
-      {/* Header */}
-      <div className="h" style={{ justifyContent: "space-between", marginBottom: 16 }}>
-        <h2 className="h" style={{ gap: 10, margin: 0 }}>
-          Aftermeta <span className="badge">{svc || "?"}</span>
-        </h2>
-        <button onClick={loadHealth}>Ping</button>
-      </div>
+      <header className="h" style={{ justifyContent: "space-between", marginBottom: 24 }}>
+        <div className="h" style={{ gap: 10 }}>
+          <h1 style={{ margin: 0 }}>Aftermeta</h1>
+          {serviceName && <span className="badge">{serviceName}</span>}
+        </div>
+        <button onClick={() => window.location.reload()}>Reload</button>
+      </header>
 
-      {/* Backend down notice */}
-      {err && (
-        <div className="card" style={{ borderColor: "#3b0f12" }}>
-          <div className="h" style={{ gap: 8 }}>
-            <span className="badge">API</span>
-            <strong style={{ color: "#ff8b8b" }}>DOWN</strong>
-          </div>
-          <div className="small" style={{ marginTop: 6 }}>
-            {err}
-          </div>
-          <div className="small" style={{ marginTop: 6 }}>
-            Fix your backend or VITE_API_URL, then refresh.
-          </div>
+      {healthError && (
+        <div className="card" role="alert">
+          <div className="small">Health check failed: {healthError}</div>
         </div>
       )}
 
-      {/* Admin state banner */}
-      <AdminStatus />
+      {adminBanner}
 
-      {/* Pool creation + list */}
-      <div className="row" style={{ marginTop: 16 }}>
+      <section style={{ marginTop: 24 }}>
+        <MintPanel
+          network={network}
+          disabled={apiDown}
+          initialPool={selectedPool}
+          onMintComplete={() => {
+            loadMints();
+          }}
+        />
+      </section>
+
+      <section style={{ marginTop: 32 }} className="row">
         <div className="col">
-          <AdminPanel onCreated={() => setSelected(null)} />
+          <AdminPanel onCreated={() => setSelectedPool(null)} />
         </div>
         <div className="col">
-          <PoolList onSelect={(p) => setSelected(p)} />
+          <PoolList
+            onSelect={(pool) => {
+              setSelectedPool(pool);
+            }}
+          />
         </div>
-      </div>
+      </section>
 
-      {/* Mint + mints table */}
-      <div className="row" style={{ marginTop: 16 }}>
-        <div className="col">
-          <MintTokenForm selectedPool={selected} />
-        </div>
-        <div className="col">
-          <div className="card">
-            <h3 style={{ marginTop: 0 }}>Recent Mints</h3>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Symbol</th>
-                  <th>Pool</th>
-                  <th>Tokens</th>
-                  <th>Spend</th>
-                  <th>Confirmed</th>
-                  <th>TXID</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mints.map((m) => (
-                  <tr key={m.id}>
-                    <td>
-                      <strong>{m.symbol}</strong>
-                    </td>
-                    <td className="small">
-                      <code>{m.poolId}</code>
-                    </td>
-                    <td>{m.tokens}</td>
-                    <td>{m.spendSats}</td>
-                    <td>{m.confirmed ? "yes" : "no"}</td>
-                    <td
-                      className="small"
-                      style={{
-                        maxWidth: 340,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      <code>{m.txid}</code>
-                    </td>
-                  </tr>
-                ))}
-
-                {mints.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="small">
-                      No mints yet.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-
-            <div className="h" style={{ justifyContent: "flex-end", marginTop: 8 }}>
-              <button onClick={loadMints}>Refresh</button>
-            </div>
+      <section style={{ marginTop: 32 }}>
+        <div className="card">
+          <div className="h" style={{ justifyContent: "space-between" }}>
+            <h3 style={{ margin: 0 }}>Recent mints</h3>
+            <button onClick={loadMints} disabled={loadingMints}>
+              {loadingMints ? "Refreshing…" : "Refresh"}
+            </button>
           </div>
+          <table className="table" style={{ marginTop: 12 }}>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Pool</th>
+                <th>Tokens</th>
+                <th>Spend</th>
+                <th>Status</th>
+                <th>TXID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mints.map((mint) => (
+                <tr key={mint.id}>
+                  <td>{mint.symbol}</td>
+                  <td className="small">
+                    <code>{mint.poolId}</code>
+                  </td>
+                  <td>{mint.tokens}</td>
+                  <td>{mint.spendSats}</td>
+                  <td>
+                    <span className={`badge ${mint.confirmed ? "badge-success" : "badge-warn"}`}>
+                      {mint.confirmed ? "Confirmed" : "Pending"}
+                    </span>
+                  </td>
+                  <td className="small">
+                    <code>{mint.txid}</code>
+                  </td>
+                </tr>
+              ))}
+              {mints.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="small">
+                    No mints yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
-      </div>
+      </section>
     </div>
   );
 }
