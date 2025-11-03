@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "tsx -r dotenv/config src/api/server.ts",
-    "indexer": "tsx -r dotenv/config src/indexer/indexer.ts"
+    "indexer": "tsx -r dotenv/config src/indexer/indexer.ts",
+    "test:mint": "tsx test/mint.integration.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^9.6.0",

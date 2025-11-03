@@ -4,12 +4,13 @@ import cors from "cors";
 import crypto from "crypto";
 
 import { ENV } from "../lib/env";
-import routesv1 from "./routes.v1";
+import apiRoutes from "./routes";
 import mintRouter from "./mintTestnet";
 
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
 import { migrate } from "../lib/db";
 migrate();
+console.log(`[ENV] network=${ENV.NETWORK}`);
 
 // ----------------------------- App & Middleware -----------------------------
 const app = express();
@@ -139,8 +140,8 @@ app.use("/", txRouter);
 
 // ----------------------------- Routers -----------------------------
 // Mount at root and /api so /v1/* and /api/v1/* both work.
-app.use(routesv1);
-app.use("/api", routesv1);
+app.use(apiRoutes);
+app.use("/api", apiRoutes);
 
 app.use(mintRouter);
 app.use("/api", mintRouter);
