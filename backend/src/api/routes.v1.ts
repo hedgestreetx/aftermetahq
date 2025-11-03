@@ -7,7 +7,7 @@ import { appendLedger, refreshSupply } from "../lib/ledger";
 import { idempotency, persistResult } from "./idempotency";
 import { rid } from "../lib/ids";
 import { bsv } from "scrypt-ts";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 
 const r = Router();
 
@@ -25,6 +25,24 @@ const NET_BSV = ENV.NETWORK === "mainnet" ? "mainnet" : "testnet"; // scrypt-ts 
 const nowMs = () => Date.now();
 const isTxid = (s: string) => typeof s === "string" && /^[0-9a-fA-F]{64}$/.test(s);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+type QuoteSnapshot = {
+  poolId: string;
+  spendSats: number;
+  price: number;
+  expiresAt: number;
+};
+
+const QUOTE_TTL_MS = 30_000;
+const quoteBook = new Map<string, QuoteSnapshot>();
+
+function pruneQuotes(now = nowMs()) {
+  for (const [id, quote] of quoteBook.entries()) {
+    if (quote.expiresAt <= now) {
+      quoteBook.delete(id);
+    }
+  }
+}
 
 const WRAPPED_BODY_KEYS = ["body", "data", "payload"];
 
@@ -134,6 +152,78 @@ r.get("/debug/db/summary", (_req, res) => {
       lastPool: lastPool || null,
       lastMint: lastMint || null,
     });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ----------------------------- buy quotes/orders -----------------------------
+r.post("/v1/buy/quote", (req, res) => {
+  try {
+    const body = normalizeBody(req.body);
+    const poolId = String(getField(body, "poolId") || "").trim();
+    const spendSats = Number(getField(body, "spendSats"));
+    const maxSlippageBps = Number(getField(body, "maxSlippageBps") ?? 0);
+
+    if (!poolId) return res.status(400).json({ ok: false, error: "missing_pool" });
+    if (!Number.isFinite(spendSats) || spendSats <= 0)
+      return res.status(400).json({ ok: false, error: "invalid_spend" });
+
+    const spend = Math.round(spendSats);
+    const slip = clamp(Number.isFinite(maxSlippageBps) ? maxSlippageBps : 0, 0, 10_000);
+
+    pruneQuotes();
+
+    const basePrice = Math.max(1, Math.round(spend / 100 + 1));
+    const price = Number((basePrice * (1 + slip / 100_000)).toFixed(2));
+    const expiresAt = nowMs() + QUOTE_TTL_MS;
+    const quoteId = randomUUID();
+
+    quoteBook.set(quoteId, { poolId, spendSats: spend, price, expiresAt });
+
+    res.json({ ok: true, quote: { quoteId, price, expiresAt } });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+r.post("/v1/buy/order", idempotency(), (req, res) => {
+  try {
+    const body = normalizeBody(req.body);
+    const quoteId = String(getField(body, "quoteId") || "").trim();
+    const poolId = String(getField(body, "poolId") || "").trim();
+    const spendSats = Number(getField(body, "spendSats"));
+
+    if (!quoteId) return res.status(400).json({ ok: false, error: "missing_quote" });
+    if (!poolId) return res.status(400).json({ ok: false, error: "missing_pool" });
+    if (!Number.isFinite(spendSats) || spendSats <= 0)
+      return res.status(400).json({ ok: false, error: "invalid_spend" });
+
+    pruneQuotes();
+
+    const quote = quoteBook.get(quoteId);
+    if (!quote) return res.status(404).json({ ok: false, error: "quote_not_found" });
+
+    if (quote.expiresAt <= nowMs()) {
+      quoteBook.delete(quoteId);
+      return res.status(410).json({ ok: false, error: "quote_expired" });
+    }
+
+    if (quote.poolId !== poolId)
+      return res.status(400).json({ ok: false, error: "pool_mismatch" });
+
+    if (Math.abs(quote.spendSats - spendSats) > Math.max(1, Math.round(quote.spendSats * 0.05)))
+      return res.status(400).json({ ok: false, error: "spend_mismatch" });
+
+    const fillRatio = Math.max(0.5, Math.min(1.1, spendSats / quote.spendSats));
+    const filledTokens = Math.max(1, Math.round((spendSats / Math.max(1, quote.price)) * fillRatio));
+    const txid = createHash("sha256")
+      .update(`${quoteId}:${poolId}:${nowMs()}:${Math.random()}`)
+      .digest("hex");
+
+    quoteBook.delete(quoteId);
+
+    res.json({ ok: true, order: { txid, filledTokens } });
   } catch (e: any) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -420,7 +510,7 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     const symUpper = (sym || "").toUpperCase();
 
     // Wallet + UTXOs
-    const priv = bsv.PrivateKey.fromWIF(trimmedWif);
+    const priv = bsv.PrivateKey.fromWIF(wif);
     const fromAddr = priv.toAddress(NET_BSV).toString();
     const utxos = await fetchUtxos(fromAddr);
     if (!utxos.length) throw new Error("no_funds");
@@ -518,7 +608,11 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     persistResult(req, out, "MINT_REAL", req.body);
     res.json(out);
   } catch (e: any) {
-    res.status(400).json({ ok: false, error: String(e?.message || e) });
+    const msg = String(e?.message || e);
+    if (msg.includes("FOREIGN KEY")) {
+      return res.status(400).json({ ok: false, error: "pool_fk_missing" });
+    }
+    res.status(400).json({ ok: false, error: msg });
   }
 });
 
