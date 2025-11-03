@@ -50,9 +50,10 @@ db.pragma("foreign_keys = ON");        // DO NOT turn this off
 db.pragma("busy_timeout = 5000");      // basic backoff under write contention
 
 // Loud boot logs so you stop guessing which file/flags are in play
-console.log(`[DB] using file: ${DB_PATH}`);
+console.log(
+  `[DB] OPEN: ${DB_PATH} | foreign_keys=${db.pragma("foreign_keys", { simple: true })}`
+);
 console.log(`[DB] migrations dir: ${MIGRATIONS_DIR}`);
-console.log(`[DB] PRAGMA foreign_keys = ${db.pragma("foreign_keys", { simple: true })}`);
 console.log(`[DB] PRAGMA journal_mode = ${(db.pragma("journal_mode", { simple: true }) as any)}`);
 
 // -----------------------------------------------------------------------------
@@ -118,6 +119,63 @@ export function migrate(): void {
     db.pragma("foreign_keys = ON");
     console.log(`[DB] PRAGMA foreign_keys = ${db.pragma("foreign_keys", { simple: true })}`);
   }
+
+  ensureMintForeignKey();
+  ensureSchemaIndexes();
+}
+
+function ensureMintForeignKey() {
+  const fkInfo = db.prepare(`PRAGMA foreign_key_list(mints)`).all() as Array<any>;
+  const target = fkInfo.find((row) => String(row?.table || "").toLowerCase() === "pools");
+  const onDelete = String(target?.on_delete || target?.onDelete || "").toUpperCase();
+  const onUpdate = String(target?.on_update || target?.onUpdate || "").toUpperCase();
+  const needsRebuild = !target || onDelete !== "RESTRICT" || onUpdate !== "CASCADE";
+
+  if (!needsRebuild) {
+    return;
+  }
+
+  const fkState = db.pragma("foreign_keys", { simple: true }) as number;
+  try {
+    if (fkState !== 0) {
+      db.pragma("foreign_keys = OFF");
+    }
+
+    const tx = db.transaction(() => {
+      const tempName = "mints__rebuild__day11";
+      db.exec(`ALTER TABLE mints RENAME TO ${tempName};`);
+      db.exec(`
+        CREATE TABLE mints (
+          id TEXT PRIMARY KEY,
+          pool_id TEXT NOT NULL REFERENCES pools(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+          symbol TEXT NOT NULL,
+          account TEXT NOT NULL,
+          spend_sats INTEGER NOT NULL,
+          tokens INTEGER NOT NULL,
+          txid TEXT NOT NULL UNIQUE,
+          confirmed INTEGER NOT NULL DEFAULT 0,
+          created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`
+        INSERT INTO mints (id, pool_id, symbol, account, spend_sats, tokens, txid, confirmed, created_at)
+        SELECT id, pool_id, symbol, account, spend_sats, tokens, txid, confirmed, created_at FROM ${tempName};
+      `);
+      db.exec(`DROP TABLE ${tempName};`);
+    });
+
+    tx();
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
+}
+
+function ensureSchemaIndexes() {
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mints_txid ON mints(txid);
+    CREATE INDEX IF NOT EXISTS idx_mints_pool_id ON mints(pool_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pools_symbol_uc ON pools(UPPER(symbol));
+  `);
 }
 
 // -----------------------------------------------------------------------------

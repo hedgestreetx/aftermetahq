@@ -20,7 +20,6 @@ const FEE_PER_KB = ENV.FEE_PER_KB || 150;
 
 const BASE58_RX = /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/;
 const NET_WOC = ENV.NETWORK === "mainnet" ? "main" : "test";     // WOC URL segment
-const NET_BSV = ENV.NETWORK === "mainnet" ? "mainnet" : "testnet"; // scrypt-ts network
 
 const nowMs = () => Date.now();
 const isTxid = (s: string) => typeof s === "string" && /^[0-9a-fA-F]{64}$/.test(s);
@@ -130,6 +129,10 @@ r.get("/v1/admin/state", (_req, res) => {
     poolAddr: ENV.POOL_P2SH_ADDRESS || "",
     poolLockingScriptHexLen: (ENV.POOL_LOCKING_SCRIPT_HEX || "").length,
   });
+});
+
+r.get("/debug/db/fk", (_req, res) => {
+  res.json({ fk: db.pragma("foreign_keys", { simple: true }) });
 });
 
 // ----------------------------- DEBUG: DB summary -----------------------------
@@ -393,38 +396,230 @@ async function waitVisibleNonFatal(
   return { visible: false, attempts };
 }
 
-// ----------------------------- helpers: resolve pool -----------------------------
-function resolvePoolIdAndSymbol(opts: {
-  poolId?: string;
-  symbol?: string;
-  poolLockingScriptHex?: string;
-}) {
-  const reqPoolId = (opts.poolId || "").trim();
-  const reqSymbol = (opts.symbol || "").trim().toUpperCase();
+class MintError extends Error {
+  status: number;
+  constructor(code: string, status = 400) {
+    super(code);
+    this.status = status;
+  }
+}
 
+function estimateFeeSats(inputs: number, outputs: number) {
+  const bytes = 10 + 148 * inputs + 34 * outputs;
+  return Math.ceil(bytes / 1000) * FEE_PER_KB;
+}
+
+type MintUtxo = { tx_hash: string; tx_pos: number; value: number };
+
+function selectInputsGreedy(utxos: MintUtxo[], spend: number) {
+  const normalized = utxos
+    .map((u) => ({ ...u, value: Number(u.value) || 0 }))
+    .filter((u) => u.value > 0);
+  const sorted = normalized.sort((a, b) => b.value - a.value);
+  const selected: MintUtxo[] = [];
+  let total = 0;
+
+  for (const utxo of sorted) {
+    selected.push(utxo);
+    total += utxo.value;
+
+    const needed = spend + estimateFeeSats(selected.length, 2) + DUST;
+    if (total >= needed) {
+      break;
+    }
+  }
+
+  return { selected, total };
+}
+
+type PoolRow = {
+  id: string;
+  symbol: string;
+  locking_script_hex?: string | null;
+  pool_address?: string | null;
+};
+
+function resolvePoolRow(opts: { poolId?: string; symbol?: string }): PoolRow {
+  const reqPoolId = String(opts.poolId || "").trim();
+  const reqSymbol = String(opts.symbol || "").trim().toUpperCase();
+
+  let row: PoolRow | undefined;
   if (reqPoolId) {
-    const r = db.prepare(`SELECT id, symbol FROM pools WHERE id=?`).get(reqPoolId) as any;
-    if (!r) throw new Error("pool_not_found");
-    return { poolId: r.id, symbol: String(r.symbol || "").toUpperCase() };
-  }
-  if (reqSymbol) {
-    const r = db
-      .prepare(`SELECT id, symbol FROM pools WHERE UPPER(symbol)=?`)
+    row = db
+      .prepare(`SELECT id, symbol, locking_script_hex, pool_address FROM pools WHERE id=?`)
+      .get(reqPoolId) as any;
+  } else if (reqSymbol) {
+    row = db
+      .prepare(`SELECT id, symbol, locking_script_hex, pool_address FROM pools WHERE UPPER(symbol)=?`)
       .get(reqSymbol) as any;
-    if (!r) throw new Error("pool_not_found_by_symbol");
-    return { poolId: r.id, symbol: String(r.symbol || "").toUpperCase() };
   }
-  const lsh = (opts.poolLockingScriptHex || ENV.POOL_LOCKING_SCRIPT_HEX || "")
-    .trim()
-    .toLowerCase();
-  if (lsh) {
-    const r = db
-      .prepare(`SELECT id, symbol FROM pools WHERE LOWER(locking_script_hex)=?`)
-      .get(lsh) as any;
-    if (!r) throw new Error("pool_not_found_by_script");
-    return { poolId: r.id, symbol: String(r.symbol || "").toUpperCase() };
+
+  if (!row) {
+    throw new MintError("pool_fk_missing");
   }
-  throw new Error("pool_not_resolved");
+
+  return {
+    id: row.id,
+    symbol: String(row.symbol || "").toUpperCase(),
+    locking_script_hex: row.locking_script_hex,
+    pool_address: row.pool_address,
+  };
+}
+
+function parseMintPrivateKey(wif: string) {
+  const trimmed = String(wif || "").trim();
+  if (!trimmed) {
+    throw new MintError("missing_wif");
+  }
+  if (!BASE58_RX.test(trimmed) || trimmed.length < 50 || trimmed.length > 60) {
+    throw new MintError("invalid_wif_format");
+  }
+
+  let priv: bsv.PrivateKey;
+  try {
+    priv = bsv.PrivateKey.fromWIF(trimmed);
+  } catch {
+    throw new MintError("invalid_wif_format");
+  }
+
+  const networkName = String((priv.network as any)?.name || "").toLowerCase();
+  const envNetwork = String(ENV.NETWORK || "testnet").toLowerCase();
+  const expect = envNetwork === "mainnet" || envNetwork === "livenet" ? "livenet" : "testnet";
+
+  if (expect === "livenet") {
+    if (networkName !== "livenet" && networkName !== "mainnet") {
+      throw new MintError("network_mismatch");
+    }
+  } else if (networkName !== "testnet") {
+    throw new MintError("network_mismatch");
+  }
+
+  return priv;
+}
+
+function buildMintTransaction(params: {
+  priv: bsv.PrivateKey;
+  fromAddress: string;
+  spend: number;
+  selectedInputs: MintUtxo[];
+  totalInput: number;
+  destScriptHex?: string;
+  destAddress?: string;
+}) {
+  const { priv, fromAddress, spend, selectedInputs, totalInput } = params;
+  const destScriptHex = String(params.destScriptHex || "").trim();
+  const destAddress = String(params.destAddress || "").trim();
+  const inputsCount = selectedInputs.length;
+
+  if (!inputsCount) {
+    throw new MintError("insufficient_funds");
+  }
+
+  const hasScript = destScriptHex.length > 0;
+  if (!hasScript && !destAddress) {
+    throw new MintError("no_pool_destination");
+  }
+
+  let poolScript: bsv.Script | null = null;
+  if (hasScript) {
+    try {
+      poolScript = bsv.Script.fromHex(destScriptHex);
+    } catch {
+      throw new MintError("no_pool_destination");
+    }
+  }
+
+  const minFeeNoChange = estimateFeeSats(inputsCount, 1);
+  if (totalInput < spend + minFeeNoChange) {
+    throw new MintError("insufficient_funds");
+  }
+
+  const minFeeWithChange = estimateFeeSats(inputsCount, 2);
+  let includeChange = totalInput - spend - minFeeWithChange >= DUST;
+  let desiredChange = includeChange ? totalInput - spend - minFeeWithChange : 0;
+
+  if (includeChange && desiredChange < DUST) {
+    includeChange = false;
+    desiredChange = 0;
+  }
+
+  const changeScript = bsv.Script.buildPublicKeyHashOut(fromAddress);
+
+  const attempt = (wantChange: boolean, changeValue: number) => {
+    const tx = new bsv.Transaction();
+    for (const utxo of selectedInputs) {
+      tx.from({
+        txId: utxo.tx_hash,
+        outputIndex: utxo.tx_pos,
+        script: changeScript,
+        satoshis: utxo.value,
+      });
+    }
+
+    if (poolScript) {
+      tx.addOutput(
+        new bsv.Transaction.Output({
+          script: poolScript,
+          satoshis: spend,
+        })
+      );
+    } else {
+      tx.to(destAddress, spend);
+    }
+
+    if (wantChange && changeValue >= DUST) {
+      tx.addOutput(
+        new bsv.Transaction.Output({
+          script: changeScript,
+          satoshis: changeValue,
+        })
+      );
+    }
+
+    tx.sign(priv);
+
+    const raw = tx.serialize(true);
+    const bytes = raw.length / 2;
+    const fee = Math.ceil(bytes / 1000) * FEE_PER_KB;
+    const finalChange = totalInput - spend - fee;
+    return { tx, raw, fee, finalChange, wantChange: wantChange && changeValue >= DUST };
+  };
+
+  let result = attempt(includeChange, Math.max(0, Math.trunc(desiredChange)));
+  if (result.finalChange < 0) {
+    throw new MintError("overspend");
+  }
+
+  if (result.wantChange) {
+    if (result.finalChange < DUST) {
+      if (totalInput < spend + minFeeNoChange) {
+        throw new MintError("insufficient_funds_no_change");
+      }
+      result = attempt(false, 0);
+      if (result.finalChange < 0) {
+        throw new MintError("overspend");
+      }
+    } else if (result.finalChange !== Math.trunc(desiredChange)) {
+      result = attempt(true, result.finalChange);
+      if (result.finalChange < DUST) {
+        if (totalInput < spend + minFeeNoChange) {
+          throw new MintError("insufficient_funds_no_change");
+        }
+        result = attempt(false, 0);
+        if (result.finalChange < 0) {
+          throw new MintError("overspend");
+        }
+      }
+    }
+  }
+
+  for (const out of result.tx.outputs) {
+    if (out.satoshis > 0 && out.satoshis < DUST) {
+      throw new MintError("dust_change");
+    }
+  }
+
+  return result;
 }
 
 // ----------------------------- UTXOs passthrough -----------------------------
@@ -482,21 +677,17 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
       return res.status(400).json({ ok: false, error: "missing_wif" });
     }
     if (spendValue === null || spendValue <= 0) {
-      return res.status(400).json({ ok: false, error: "invalid_spend" });
+      throw new MintError("invalid_spend");
     }
 
-    // Resolve pool (by id/symbol/script). Hard stop if not found.
-    const { poolId: pid, symbol: sym } = resolvePoolIdAndSymbol({
-      poolId,
-      symbol,
-      poolLockingScriptHex,
-    });
-    const poolRow = db.prepare(
-      `SELECT id, locking_script_hex AS lsh, pool_address AS paddr FROM pools WHERE id=?`
-    ).get(pid) as any;
-    if (!poolRow) return res.status(404).json({ ok: false, error: "pool_fk_missing" });
+    const spend = Math.trunc(spendValue);
+    if (spend < DUST) {
+      throw new MintError("dust_output");
+    }
 
-    const symUpper = (sym || "").toUpperCase();
+    const poolRow = resolvePoolRow({ poolId, symbol });
+    poolIdForLog = poolRow.id;
+    symbolForLog = poolRow.symbol;
 
     // Wallet + UTXOs
     const priv = bsv.PrivateKey.fromWIF(wif);
@@ -504,70 +695,67 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     const utxos = await fetchUtxos(fromAddr);
     if (!utxos.length) throw new Error("no_funds");
 
-    const spend = Math.trunc(spendValue);
-    if (spend < DUST) throw new Error("dust_output");
+    const destinationScript = destScript;
+    const destinationAddress = destinationScript ? "" : poolAddress || envPoolAddress;
 
-    const tx = new bsv.Transaction();
-    let inputTotal = 0;
-    for (const u of utxos) {
-      tx.from({
-        txId: u.tx_hash,
-        outputIndex: u.tx_pos,
-        script: bsv.Script.buildPublicKeyHashOut(fromAddr),
-        satoshis: u.value,
-      });
-      inputTotal += u.value;
+    destScriptForLog = destinationScript;
+    destAddressForLog = destinationAddress;
+
+    if (!destinationScript && !destinationAddress) {
+      throw new MintError("no_pool_destination");
     }
 
-    // Prefer pool's script, else its address, else ENV fallback
-    const lshFromReq = String(poolLockingScriptHex || "").trim();
-    const lsh =
-      lshFromReq ||
-      String(poolRow.lsh || "").trim() ||
-      String(ENV.POOL_LOCKING_SCRIPT_HEX || "").trim();
-    const paddr =
-      String(poolRow.paddr || "").trim() ||
-      String(ENV.POOL_P2SH_ADDRESS || "").trim();
-
-    if (!lsh && !paddr) {
-      return res.status(400).json({ ok: false, error: "no_pool_destination" });
+    const utxos = await fetchUtxos(fromAddress);
+    if (!utxos.length) {
+      throw new MintError("no_funds");
     }
 
-    if (lsh) {
-      tx.addOutput(
-        new bsv.Transaction.Output({
-          script: bsv.Script.fromHex(lsh),
-          satoshis: spend,
-        })
-      );
-    } else {
-      tx.to(paddr, spend);
+    const selection = selectInputsGreedy(utxos, spend);
+    selectedInputs = selection.selected;
+    const totalInput = selection.total;
+
+    if (!selectedInputs.length) {
+      throw new MintError("insufficient_funds");
     }
 
-    tx.change(fromAddr);
-    tx.feePerKb(FEE_PER_KB);
-    tx.sign(priv);
-
-    for (const o of tx.outputs) {
-      if (o.satoshis > 0 && o.satoshis < DUST) throw new Error("dust_change");
+    if (totalInput < spend + estimateFeeSats(selectedInputs.length, 1)) {
+      throw new MintError("insufficient_funds");
     }
 
-    const raw = tx.serialize(true);
-    if (raw.length / 2 > inputTotal) throw new Error("overspend");
+    const txResult = buildMintTransaction({
+      priv,
+      fromAddress,
+      spend,
+      selectedInputs,
+      totalInput,
+      destScriptHex: destinationScript,
+      destAddress: destinationAddress,
+    });
 
-    // Broadcast
-    const txid = await broadcastRawTx(raw);
-
-    // Non-fatal visibility wait (fix your 404 tantrum)
+    const txid = await broadcastRawTx(txResult.raw);
     const { visible, attempts } = await waitVisibleNonFatal(txid);
 
-    // Persist (idempotent on txid)
-    const tokens = Math.max(0, Math.floor(spend / 1000)); // pricing stub
-    const has = db.prepare(`SELECT id FROM mints WHERE txid=?`).get(txid) as any;
-    if (has) {
-      const outDup = { ok: true, txid, poolId: pid, symbol: symUpper, id: has.id, tokens, visible, attempts };
-      persistResult(req, outDup, "MINT_REAL_DUP", req.body);
-      return res.json(outDup);
+    const guard = db.prepare(`SELECT 1 FROM pools WHERE id=?`).get(poolRow.id) as any;
+    if (!guard) {
+      throw new MintError("pool_fk_missing");
+    }
+
+    const tokens = Math.max(0, Math.floor(spend / 1000));
+    const existing = db.prepare(`SELECT id FROM mints WHERE txid=?`).get(txid) as any;
+    const base = {
+      ok: true,
+      txid,
+      poolId: poolRow.id,
+      symbol: poolRow.symbol,
+      tokens,
+      visible,
+      attempts,
+    };
+
+    if (existing?.id) {
+      const dupOut = { ...base, id: existing.id };
+      persistResult(req, dupOut, "MINT_REAL_DUP", body);
+      return res.json(dupOut);
     }
 
     const id = randomUUID();
@@ -575,17 +763,17 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
       db.prepare(
         `INSERT INTO mints (id, pool_id, symbol, account, spend_sats, tokens, txid, confirmed)
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
-      ).run(id, pid, symUpper, fromAddr, spend, tokens, txid);
+      ).run(id, poolRow.id, poolRow.symbol, fromAddress, spend, tokens, txid);
     } catch (err: any) {
       const msg = String(err?.message || err);
       if (msg.includes("FOREIGN KEY")) {
-        return res.status(400).json({ ok: false, error: "pool_fk_missing" });
+        throw new MintError("pool_fk_missing");
       }
       if (msg.includes("UNIQUE") && msg.includes("mints") && msg.includes("txid")) {
         const row = db.prepare(`SELECT id FROM mints WHERE txid=?`).get(txid) as any;
-        const outDup2 = { ok: true, txid, poolId: pid, symbol: symUpper, id: row?.id || id, tokens, visible, attempts };
-        persistResult(req, outDup2, "MINT_REAL_DUP2", req.body);
-        return res.json(outDup2);
+        const dupOut2 = { ...base, id: row?.id || id };
+        persistResult(req, dupOut2, "MINT_REAL_DUP2", body);
+        return res.json(dupOut2);
       }
       throw err;
     }

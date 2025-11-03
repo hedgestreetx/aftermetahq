@@ -10,6 +10,7 @@ import mintRouter from "./mintTestnet";
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
 import { migrate } from "../lib/db";
 migrate();
+console.log(`[ENV] network=${ENV.NETWORK}`);
 
 // ----------------------------- App & Middleware -----------------------------
 const app = express();
