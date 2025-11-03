@@ -686,32 +686,22 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
     }
 
     const poolRow = resolvePoolRow({ poolId, symbol });
-    poolIdForLog = poolRow.id;
-    symbolForLog = poolRow.symbol;
 
     // Wallet + UTXOs
     const priv = bsv.PrivateKey.fromWIF(wif);
-    const fromAddr = priv.toAddress(NET_BSV).toString();
+    const fromAddr = priv.toAddress(ENV.NETWORK).toString();
     const utxos = await fetchUtxos(fromAddr);
     if (!utxos.length) throw new Error("no_funds");
 
-    const destinationScript = destScript;
-    const destinationAddress = destinationScript ? "" : poolAddress || envPoolAddress;
-
-    destScriptForLog = destinationScript;
-    destAddressForLog = destinationAddress;
+    const destinationScript = poolLockingScriptHex || poolRow.locking_script_hex;
+    const destinationAddress = destinationScript ? "" : poolRow.pool_address || ENV.POOL_P2SH_ADDRESS;
 
     if (!destinationScript && !destinationAddress) {
       throw new MintError("no_pool_destination");
     }
 
-    const utxos = await fetchUtxos(fromAddress);
-    if (!utxos.length) {
-      throw new MintError("no_funds");
-    }
-
     const selection = selectInputsGreedy(utxos, spend);
-    selectedInputs = selection.selected;
+    const selectedInputs = selection.selected;
     const totalInput = selection.total;
 
     if (!selectedInputs.length) {
@@ -724,7 +714,7 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
 
     const txResult = buildMintTransaction({
       priv,
-      fromAddress,
+      fromAddress: fromAddr,
       spend,
       selectedInputs,
       totalInput,
@@ -763,7 +753,7 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
       db.prepare(
         `INSERT INTO mints (id, pool_id, symbol, account, spend_sats, tokens, txid, confirmed)
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
-      ).run(id, poolRow.id, poolRow.symbol, fromAddress, spend, tokens, txid);
+      ).run(id, poolRow.id, poolRow.symbol, fromAddr, spend, tokens, txid);
     } catch (err: any) {
       const msg = String(err?.message || err);
       if (msg.includes("FOREIGN KEY")) {
@@ -778,10 +768,10 @@ r.post("/v1/mint", idempotency(), async (req, res) => {
       throw err;
     }
 
-    appendLedger(pid, fromAddr, symUpper, tokens, "MINT_FILL");
-    refreshSupply(pid, symUpper);
+    appendLedger(poolRow.id, fromAddr, poolRow.symbol, tokens, "MINT_FILL");
+    refreshSupply(poolRow.id, poolRow.symbol);
 
-    const out = { ok: true, txid, poolId: pid, symbol: symUpper, id, tokens, visible, attempts };
+    const out = { ok: true, txid, poolId: poolRow.id, symbol: poolRow.symbol, id, tokens, visible, attempts };
     persistResult(req, out, "MINT_REAL", req.body);
     res.json(out);
   } catch (e: any) {
