@@ -1,47 +1,25 @@
 import { db } from "./db";
 import { queryWocTxStatus } from "./woc";
 
-type Statement = ReturnType<typeof db.prepare> | null;
+const markMintConfirmedStmt = db.prepare(
+  `UPDATE mints SET confirmed = 1 WHERE txid = ? COLLATE NOCASE`,
+);
 
-let markMintConfirmedStmt: Statement = null;
-let pendingMintsStmt: Statement = null;
-
-function ensureStatements() {
-  if (markMintConfirmedStmt && pendingMintsStmt) {
-    return;
-  }
-
-  try {
-    if (!markMintConfirmedStmt) {
-      markMintConfirmedStmt = db.prepare(
-        `UPDATE mints SET confirmed = 1 WHERE txid = ? COLLATE NOCASE`,
-      );
-    }
-
-    if (!pendingMintsStmt) {
-      pendingMintsStmt = db.prepare(
-        `SELECT txid FROM mints
-          WHERE confirmed = 0
-            AND length(txid) = 64
-            AND txid GLOB '[0-9a-fA-F]*'
-          ORDER BY created_at DESC
-          LIMIT ?`,
-      );
-    }
-  } catch (err) {
-    markMintConfirmedStmt = null;
-    pendingMintsStmt = null;
-    throw new Error(`mint_verifier_prepare_failed: ${String((err as any)?.message || err)}`);
-  }
-}
+const pendingMintsStmt = db.prepare(
+  `SELECT txid FROM mints
+    WHERE confirmed = 0
+      AND length(txid) = 64
+      AND txid GLOB '[0-9a-fA-F]*'
+    ORDER BY created_at DESC
+    LIMIT ?`,
+);
 
 export const normalizeTxid = (value: string) => String(value ?? "").trim().toLowerCase();
 
 export const isTxid = (value: string) => /^[0-9a-f]{64}$/.test(normalizeTxid(value));
 
 export function markMintConfirmed(txid: string): number {
-  ensureStatements();
-  return markMintConfirmedStmt!.run(txid).changes;
+  return markMintConfirmedStmt.run(txid).changes;
 }
 
 export type MintStatus = {
@@ -83,9 +61,7 @@ export async function loadMintStatus(txid: string): Promise<MintStatus> {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function verifyPendingMints(limit = 100): Promise<{ checked: number; flipped: number }> {
-  ensureStatements();
-
-  const rows = pendingMintsStmt!.all(limit) as Array<{ txid: string }>;
+  const rows = pendingMintsStmt.all(limit) as Array<{ txid: string }>;
   const unique: string[] = [];
   const seen = new Set<string>();
   for (const row of rows) {

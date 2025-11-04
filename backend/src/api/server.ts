@@ -8,10 +8,7 @@ import apiRoutes from "./routes";
 import mintRouter from "./mintTestnet";
 
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
-import { migrate } from "../lib/db";
-import { NET_WOC } from "../lib/woc";
-import { verifyPendingMints } from "../lib/mintVerifier";
-
+import { db, migrate } from "../lib/db";
 migrate();
 console.log(`[NET] network=${ENV.NETWORK} NET_WOC=${NET_WOC}`);
 
@@ -55,15 +52,92 @@ function healthPayload() {
 app.get("/health", (_req, res) => res.json(healthPayload()));
 app.get("/api/health", (_req, res) => res.json(healthPayload()));
 
-// ----------------------------- Verify Interval -----------------------------
-if (ENV.VERIFY_INTERVAL_MS > 0) {
-  const interval = Math.max(ENV.VERIFY_INTERVAL_MS, 1000);
-  console.log(`[VERIFY] interval enabled ms=${interval}`);
-  setInterval(async () => {
+// ----------------------------- TX Watcher (WOC) -----------------------------
+const WOC_NET =
+  ENV.NETWORK === "mainnet" || ENV.NETWORK === "livenet" ? "main" : "test";
+
+type TxState = {
+  txid: string;
+  confirmed: boolean;
+  confs: number;
+  nextCheckAt: number;
+  attempts: number;
+  error?: string;
+};
+
+const txCache = new Map<string, TxState>();
+const BACKOFF_STEPS_SEC = [5, 15, 30, 60, 120, 300, 600];
+
+function nextDelayMs(attempts: number) {
+  const idx = Math.min(attempts, BACKOFF_STEPS_SEC.length - 1);
+  return BACKOFF_STEPS_SEC[idx] * 1000;
+}
+
+async function queryStatus(txid: string): Promise<{ confirmed: boolean; confs: number }> {
+  const url = `https://api.whatsonchain.com/v1/bsv/${WOC_NET}/tx/${txid}/status`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`WOC status ${r.status}`);
+  const j: any = await r.json();
+  const confirmed = !!(j.confirmed ?? j.isConfirmed ?? false);
+  const confs = Number(j.confirmations ?? j.confs ?? (confirmed ? 1 : 0));
+  return { confirmed, confs: Number.isFinite(confs) ? confs : confirmed ? 1 : 0 };
+}
+
+const pendingMintStmt = db.prepare(
+  `SELECT txid
+     FROM mints
+    WHERE confirmed = 0
+      AND length(txid) = 64
+      AND txid GLOB '[0-9A-Fa-f]*'
+    ORDER BY created_at DESC
+    LIMIT 200`
+);
+const markMintConfirmedStmt = db.prepare(`UPDATE mints SET confirmed = 1 WHERE txid = ?`);
+
+function seedPendingMints() {
+  const now = Date.now();
+  const rows = pendingMintStmt.all() as Array<{ txid: string }>;
+  for (const { txid } of rows) {
+    if (!txCache.has(txid)) {
+      txCache.set(txid, {
+        txid,
+        confirmed: false,
+        confs: 0,
+        nextCheckAt: now,
+        attempts: 0,
+      });
+    }
+  }
+}
+
+seedPendingMints();
+
+setInterval(async () => {
+  seedPendingMints();
+  const now = Date.now();
+  for (const s of txCache.values()) {
+    if (s.confirmed || s.nextCheckAt > now) continue;
     try {
-      await verifyPendingMints(100);
-    } catch (err: any) {
-      console.error(`[VERIFY] interval_error ${String(err?.message || err)}`);
+      const { confirmed, confs } = await queryStatus(s.txid);
+      s.error = undefined;
+      s.attempts++;
+      if (confirmed && !s.confirmed) {
+        try {
+          const result = markMintConfirmedStmt.run(s.txid);
+          if (result.changes > 0) {
+            console.log(`[TX] confirmed mint txid=${s.txid}`);
+          }
+        } catch (err: any) {
+          console.error(`[_tx] failed to mark mint confirmed txid=${s.txid}: ${String(err?.message || err)}`);
+        }
+      }
+      s.confirmed = confirmed;
+      s.confs = confs;
+      s.nextCheckAt = confirmed ? Number.POSITIVE_INFINITY : now + nextDelayMs(s.attempts);
+    } catch (e: any) {
+      s.error = String(e?.message || e);
+      s.attempts++;
+      s.nextCheckAt = now + nextDelayMs(s.attempts);
     }
   }, interval);
 }
