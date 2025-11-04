@@ -12,6 +12,7 @@ export const ENV = {
   PORT: Number(process.env.PORT || 3000),
   FEE_PER_KB: Number(process.env.FEE_PER_KB || 150),
   MIN_CONFIRMATIONS: Number(process.env.MIN_CONFIRMATIONS || 0),
+  VERIFY_INTERVAL_MS: Number(process.env.VERIFY_INTERVAL_MS || 0),
 
   ALLOW_DEV_BUY: String(process.env.ALLOW_DEV_BUY || "").toLowerCase() === "true",
   REQUIRE_MIN_CONFS: Number(process.env.REQUIRE_MIN_CONFS || 0),
