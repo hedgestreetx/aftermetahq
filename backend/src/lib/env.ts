@@ -21,5 +21,7 @@ export const ENV = {
   WOC_BASE: String(process.env.WOC_BASE || "").replace(/\/+$/, ""),
 
   POOL_P2SH_ADDRESS: String(process.env.POOL_P2SH_ADDRESS || "").trim(),
-  POOL_LOCKING_SCRIPT_HEX: String(process.env.POOL_LOCKING_SCRIPT_HEX || "").trim()
+  POOL_LOCKING_SCRIPT_HEX: String(process.env.POOL_LOCKING_SCRIPT_HEX || "").trim(),
+
+  WOC_API_KEY: String(process.env.WOC_API_KEY || "").trim(),
 } as const;

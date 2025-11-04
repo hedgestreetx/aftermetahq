@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^9.6.0",
+    "bsv": "^2.0.10",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.19.2",
@@ -16,6 +17,7 @@
     "nanoid": "^5.0.7",
     "node-fetch": "^3.3.2",
     "scrypt-ts": "^1.4.5",
+    "ws": "^8.18.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {

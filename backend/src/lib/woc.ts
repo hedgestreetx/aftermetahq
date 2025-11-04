@@ -1,59 +1,85 @@
-import { ENV } from "./env";
+import WebSocket from 'ws';
+import { ENV } from './env';
+import { db } from './db';
+import fetch from 'node-fetch';
 
-const NET_WOC = ENV.NETWORK === "mainnet" ? "main" : "test";
-const WOC_BASE = (ENV.WOC_BASE || `https://api.whatsonchain.com/v1/bsv/${NET_WOC}`).replace(/\/+$/, "");
+const WOC_URL = 'wss://socket.whatsonchain.com/mempool';
 
-export { NET_WOC, WOC_BASE };
+let ws: WebSocket | null = null;
 
-export const wocStatusUrl = (txid: string) => `${WOC_BASE}/tx/${txid}/status`;
+const markMintConfirmedStmt = db.prepare(`UPDATE mints SET confirmed = 1 WHERE txid = ?`);
 
-type ParsedStatus = {
-  confirmed: boolean;
-  confirmations: number;
-  blockHeight: number | null;
-};
+function connect() {
+  ws = new WebSocket(WOC_URL, {
+    headers: {
+      'WOC-API-KEY': ENV.WOC_API_KEY,
+    },
+  });
 
-export function parseWocStatus(body: any): ParsedStatus {
-  const confirmedFlag = Boolean(body?.confirmed ?? body?.isConfirmed ?? body?.valid ?? false);
-  const confirmationsRaw = Number(body?.confirmations ?? body?.confs ?? body?.Confirmations ?? body?.numConfirmations ?? NaN);
-  const confirmations = Number.isFinite(confirmationsRaw)
-    ? confirmationsRaw
-    : confirmedFlag
-    ? 1
-    : 0;
-  const blockHeightRaw = Number(
-    body?.blockheight ?? body?.blockHeight ?? body?.block_height ?? body?.height ?? NaN,
-  );
-  const blockHeight = Number.isFinite(blockHeightRaw) ? blockHeightRaw : null;
-  const confirmed = confirmedFlag || confirmations > 0;
-  return { confirmed, confirmations: confirmations > 0 ? confirmations : confirmed ? 1 : 0, blockHeight };
+  ws.on('open', () => {
+    console.log('[WOC] WebSocket connected');
+  });
+
+  ws.on('message', (data: WebSocket.Data) => {
+    const message = JSON.parse(data.toString());
+    if (message.type === 'tx' && message.payload) {
+      const { txid, status } = message.payload;
+      if (status === 'confirmed') {
+        try {
+          const result = markMintConfirmedStmt.run(txid);
+          if (result.changes > 0) {
+            console.log(`[WOC] Confirmed transaction: ${txid}`);
+          }
+        } catch (err: any) {
+          console.error(`[WOC] failed to mark mint confirmed txid=${txid}: ${String(err?.message || err)}`);
+        }
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('[WOC] WebSocket disconnected');
+    ws = null;
+    // Reconnect after a delay
+    setTimeout(connect, 5000);
+  });
+
+  ws.on('error', (error: Error) => {
+    console.error('[WOC] WebSocket error:', error);
+  });
 }
 
-export async function queryWocTxStatus(txid: string): Promise<
-  ParsedStatus & { ok: boolean; status: number; error?: string }
-> {
-  const url = wocStatusUrl(txid);
-  try {
-    const resp = await fetch(url);
-    let body: any = null;
-    try {
-      body = await resp.json();
-    } catch {
-      body = null;
+export async function queryWocTxStatus(txid: string) {
+  const res = await fetch(`https://api.whatsonchain.com/v1/bsv/main/tx/${txid}/status`, {
+    headers: {
+      'WOC-API-KEY': ENV.WOC_API_KEY,
     }
-    const parsed = parseWocStatus(body);
-    if (!resp.ok) {
-      return { ...parsed, ok: false, status: resp.status, error: `woc_status_${resp.status}` };
-    }
-    return { ...parsed, ok: true, status: resp.status };
-  } catch (err: any) {
+  });
+  if (!res.ok) {
     return {
+      ok: false,
+      status: res.status,
       confirmed: false,
       confirmations: 0,
       blockHeight: null,
-      ok: false,
-      status: 0,
-      error: "woc_status_fetch_failed",
+      error: res.statusText,
     };
   }
+  const data = await res.json();
+  return {
+    ok: true,
+    status: 200,
+    confirmed: data.confirmed,
+    confirmations: data.confirmations,
+    blockHeight: data.block_height,
+    error: undefined,
+  };
+}
+
+export function startWocSocket() {
+  if (!ENV.WOC_API_KEY) {
+    console.warn('[WOC] WOC_API_KEY not set, WebSocket will not be connected.');
+    return;
+  }
+  connect();
 }

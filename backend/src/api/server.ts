@@ -10,6 +10,7 @@ import mintRouter from "./mintTestnet";
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
 import { db, migrate } from "../lib/db";
 migrate();
+const NET_WOC = ENV.NETWORK === "mainnet" || ENV.NETWORK === "livenet" ? "main" : "test";
 console.log(`[NET] network=${ENV.NETWORK} NET_WOC=${NET_WOC}`);
 
 // ----------------------------- App & Middleware -----------------------------
@@ -52,117 +53,13 @@ function healthPayload() {
 app.get("/health", (_req, res) => res.json(healthPayload()));
 app.get("/api/health", (_req, res) => res.json(healthPayload()));
 
-// ----------------------------- TX Watcher (WOC) -----------------------------
-const WOC_NET =
-  ENV.NETWORK === "mainnet" || ENV.NETWORK === "livenet" ? "main" : "test";
 
-type TxState = {
-  txid: string;
-  confirmed: boolean;
-  confs: number;
-  nextCheckAt: number;
-  attempts: number;
-  error?: string;
-};
 
-const txCache = new Map<string, TxState>();
-const BACKOFF_STEPS_SEC = [5, 15, 30, 60, 120, 300, 600];
-
-function nextDelayMs(attempts: number) {
-  const idx = Math.min(attempts, BACKOFF_STEPS_SEC.length - 1);
-  return BACKOFF_STEPS_SEC[idx] * 1000;
-}
-
-async function queryStatus(txid: string): Promise<{ confirmed: boolean; confs: number }> {
-  const url = `https://api.whatsonchain.com/v1/bsv/${WOC_NET}/tx/${txid}/status`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`WOC status ${r.status}`);
-  const j: any = await r.json();
-  const confirmed = !!(j.confirmed ?? j.isConfirmed ?? false);
-  const confs = Number(j.confirmations ?? j.confs ?? (confirmed ? 1 : 0));
-  return { confirmed, confs: Number.isFinite(confs) ? confs : confirmed ? 1 : 0 };
-}
-
-const pendingMintStmt = db.prepare(
-  `SELECT txid
-     FROM mints
-    WHERE confirmed = 0
-      AND length(txid) = 64
-      AND txid GLOB '[0-9A-Fa-f]*'
-    ORDER BY created_at DESC
-    LIMIT 200`
-);
-const markMintConfirmedStmt = db.prepare(`UPDATE mints SET confirmed = 1 WHERE txid = ?`);
-
-function seedPendingMints() {
-  const now = Date.now();
-  const rows = pendingMintStmt.all() as Array<{ txid: string }>;
-  for (const { txid } of rows) {
-    if (!txCache.has(txid)) {
-      txCache.set(txid, {
-        txid,
-        confirmed: false,
-        confs: 0,
-        nextCheckAt: now,
-        attempts: 0,
-      });
-    }
-  }
-}
-
-seedPendingMints();
-
-setInterval(async () => {
-  seedPendingMints();
-  const now = Date.now();
-  for (const s of txCache.values()) {
-    if (s.confirmed || s.nextCheckAt > now) continue;
-    try {
-      const { confirmed, confs } = await queryStatus(s.txid);
-      s.error = undefined;
-      s.attempts++;
-      if (confirmed && !s.confirmed) {
-        try {
-          const result = markMintConfirmedStmt.run(s.txid);
-          if (result.changes > 0) {
-            console.log(`[TX] confirmed mint txid=${s.txid}`);
-          }
-        } catch (err: any) {
-          console.error(`[_tx] failed to mark mint confirmed txid=${s.txid}: ${String(err?.message || err)}`);
-        }
-      }
-      s.confirmed = confirmed;
-      s.confs = confs;
-      s.nextCheckAt = confirmed ? Number.POSITIVE_INFINITY : now + nextDelayMs(s.attempts);
-    } catch (e: any) {
-      s.error = String(e?.message || e);
-      s.attempts++;
-      s.nextCheckAt = now + nextDelayMs(s.attempts);
-    }
-  }, interval);
-}
-
-// ----------------------------- Routers -----------------------------
-// Mount at root and /api so /v1/* and /api/v1/* both work.
-app.use(apiRoutes);
-app.use("/api", apiRoutes);
-
-app.use(mintRouter);
-app.use("/api", mintRouter);
-
-// ----------------------------- API 404s -----------------------------
-app.use("/api", (_req, res) => res.status(404).json({ ok: false, error: "not_found" }));
-app.use((_req, res) => res.status(404).type("text/plain").send("Not Found"));
-
-// ----------------------------- Error Handler -----------------------------
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-  const code = Number(err?.status || err?.statusCode || 500);
-  const msg = String(err?.message || "internal_error");
-  res.status(code).json({ ok: false, error: msg });
-});
+import { startWocSocket } from "../lib/woc";
 
 // ----------------------------- Boot -----------------------------
 const PORT = Number(ENV.PORT || 3000);
 app.listen(PORT, () => {
   console.log(`✅ Backend running on http://localhost:${PORT}`);
+  startWocSocket();
 });
