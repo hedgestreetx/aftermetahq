@@ -6,6 +6,7 @@ import crypto from "crypto";
 import { ENV } from "../lib/env";
 import apiRoutes from "./routes";
 import mintRouter from "./mintTestnet";
+import { startWocSocket } from "../lib/woc";
 
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
 import { db, migrate } from "../lib/db";
@@ -53,9 +54,24 @@ function healthPayload() {
 app.get("/health", (_req, res) => res.json(healthPayload()));
 app.get("/api/health", (_req, res) => res.json(healthPayload()));
 
+// ----------------------------- Routers -----------------------------
+// Mount at root and /api so /v1/* and /api/v1/* both work.
+app.use(apiRoutes);
+app.use("/api", apiRoutes);
 
+app.use(mintRouter);
+app.use("/api", mintRouter);
 
-import { startWocSocket } from "../lib/woc";
+// ----------------------------- API 404s -----------------------------
+app.use("/api", (_req, res) => res.status(404).json({ ok: false, error: "not_found" }));
+app.use((_req, res) => res.status(404).type("text/plain").send("Not Found"));
+
+// ----------------------------- Error Handler -----------------------------
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  const code = Number(err?.status || err?.statusCode || 500);
+  const msg = String(err?.message || "internal_error");
+  res.status(code).json({ ok: false, error: msg });
+});
 
 // ----------------------------- Boot -----------------------------
 const PORT = Number(ENV.PORT || 3000);
