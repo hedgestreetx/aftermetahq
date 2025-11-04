@@ -1,36 +1,37 @@
 import { Router } from "express";
 
-import { db } from "../../lib/db";
-import { ENV } from "../../lib/env";
+import { isTxid, loadMintStatus, markMintConfirmed, normalizeTxid } from "../../lib/mintVerifier";
 
 const r = Router();
 
-const NET_WOC = ENV.NETWORK === "mainnet" ? "main" : "test";
-const isTxid = (s: string) => typeof s === "string" && /^[0-9a-fA-F]{64}$/.test(s);
-
 r.get("/:txid/status", async (req, res) => {
   try {
-    const txid = String(req.params.txid || "").trim();
+    const txid = normalizeTxid(String(req.params.txid || ""));
     if (!isTxid(txid)) {
       return res.status(400).json({ ok: false, error: "invalid_txid" });
     }
 
-    const resp = await fetch(`https://api.whatsonchain.com/v1/bsv/${NET_WOC}/tx/${txid}/status`);
-    if (!resp.ok) {
-      return res.status(502).json({ ok: false, error: `woc_status_${resp.status}` });
+    const status = await loadMintStatus(txid);
+    if (!status.ok) {
+      const err = status.status > 0 ? `woc_status_${status.status}` : status.error || "woc_status_fetch_failed";
+      return res.status(502).json({ ok: false, error: err });
     }
-    const j = await resp.json().catch(() => ({} as any));
-    const confirmed = Boolean(j?.confirmed);
 
-    if (confirmed) {
-      db.prepare(`UPDATE mints SET confirmed=1 WHERE txid=?`).run(txid);
+    if (status.confirmed) {
+      markMintConfirmed(txid);
     }
+
+    console.log(
+      `[TX] status tx=${txid} confirmed=${status.confirmed ? 1 : 0} bh=${
+        status.blockHeight !== null ? status.blockHeight : "null"
+      }`,
+    );
 
     res.json({
       ok: true,
       txid,
-      confirmed,
-      blockHeight: Number(j?.blockheight ?? j?.blockHeight ?? null) || null,
+      confirmed: status.confirmed,
+      blockHeight: status.blockHeight,
       blockTime: null,
     });
   } catch (e: any) {

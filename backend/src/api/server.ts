@@ -9,8 +9,11 @@ import mintRouter from "./mintTestnet";
 
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
 import { migrate } from "../lib/db";
+import { NET_WOC } from "../lib/woc";
+import { verifyPendingMints } from "../lib/mintVerifier";
+
 migrate();
-console.log(`[ENV] network=${ENV.NETWORK}`);
+console.log(`[NET] network=${ENV.NETWORK} NET_WOC=${NET_WOC}`);
 
 // ----------------------------- App & Middleware -----------------------------
 const app = express();
@@ -52,91 +55,18 @@ function healthPayload() {
 app.get("/health", (_req, res) => res.json(healthPayload()));
 app.get("/api/health", (_req, res) => res.json(healthPayload()));
 
-// ----------------------------- TX Watcher (WOC) -----------------------------
-const WOC_NET =
-  ENV.NETWORK === "mainnet" || ENV.NETWORK === "livenet" ? "main" : "test";
-
-type TxState = {
-  txid: string;
-  confirmed: boolean;
-  confs: number;
-  nextCheckAt: number;
-  attempts: number;
-  error?: string;
-};
-
-const txCache = new Map<string, TxState>();
-const BACKOFF_STEPS_SEC = [5, 15, 30, 60, 120, 300, 600];
-
-function nextDelayMs(attempts: number) {
-  const idx = Math.min(attempts, BACKOFF_STEPS_SEC.length - 1);
-  return BACKOFF_STEPS_SEC[idx] * 1000;
-}
-
-async function queryStatus(txid: string): Promise<{ confirmed: boolean; confs: number }> {
-  const url = `https://api.whatsonchain.com/v1/bsv/${WOC_NET}/tx/${txid}/status`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`WOC status ${r.status}`);
-  const j: any = await r.json();
-  const confirmed = !!(j.confirmed ?? j.isConfirmed ?? false);
-  const confs = Number(j.confirmations ?? j.confs ?? (confirmed ? 1 : 0));
-  return { confirmed, confs: Number.isFinite(confs) ? confs : confirmed ? 1 : 0 };
-}
-
-setInterval(async () => {
-  const now = Date.now();
-  for (const s of txCache.values()) {
-    if (s.confirmed || s.nextCheckAt > now) continue;
+// ----------------------------- Verify Interval -----------------------------
+if (ENV.VERIFY_INTERVAL_MS > 0) {
+  const interval = Math.max(ENV.VERIFY_INTERVAL_MS, 1000);
+  console.log(`[VERIFY] interval enabled ms=${interval}`);
+  setInterval(async () => {
     try {
-      const { confirmed, confs } = await queryStatus(s.txid);
-      s.error = undefined;
-      s.attempts++;
-      s.confirmed = confirmed;
-      s.confs = confs;
-      s.nextCheckAt = confirmed ? Number.POSITIVE_INFINITY : now + nextDelayMs(s.attempts);
-    } catch (e: any) {
-      s.error = String(e?.message || e);
-      s.attempts++;
-      s.nextCheckAt = now + nextDelayMs(s.attempts);
+      await verifyPendingMints(100);
+    } catch (err: any) {
+      console.error(`[VERIFY] interval_error ${String(err?.message || err)}`);
     }
-  }
-}, 5000);
-
-const txRouter = express.Router();
-txRouter.post("/tx/watch", (req, res) => {
-  const txid = String(req.body?.txid || "").trim();
-  if (!/^[0-9a-f]{64}$/i.test(txid)) {
-    return res.status(400).json({ ok: false, error: "invalid txid" });
-  }
-  if (!txCache.has(txid)) {
-    txCache.set(txid, {
-      txid,
-      confirmed: false,
-      confs: 0,
-      nextCheckAt: Date.now(),
-      attempts: 0,
-    });
-  }
-  res.json({ ok: true });
-});
-txRouter.get("/tx/:txid/status", (req, res) => {
-  const txid = String(req.params.txid || "").trim();
-  const s = txCache.get(txid);
-  if (!s) return res.status(404).json({ ok: false, error: "unknown txid" });
-  res.json({
-    ok: true,
-    txid: s.txid,
-    confirmed: s.confirmed,
-    confs: s.confs,
-    nextCheckAt: s.nextCheckAt,
-    attempts: s.attempts,
-    error: s.error ?? null,
-  });
-});
-
-// Mount watcher at both /api and /
-app.use("/api", txRouter);
-app.use("/", txRouter);
+  }, interval);
+}
 
 // ----------------------------- Routers -----------------------------
 // Mount at root and /api so /v1/* and /api/v1/* both work.

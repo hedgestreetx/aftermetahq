@@ -55,6 +55,7 @@ console.log(
 );
 console.log(`[DB] migrations dir: ${MIGRATIONS_DIR}`);
 console.log(`[DB] PRAGMA journal_mode = ${(db.pragma("journal_mode", { simple: true }) as any)}`);
+console.log(`[DB] PRAGMA foreign_keys = ${db.pragma("foreign_keys", { simple: true })}`);
 
 // -----------------------------------------------------------------------------
 // Minimal migration runner
@@ -121,6 +122,7 @@ export function migrate(): void {
   }
 
   ensureMintForeignKey();
+  normalizeMintTxids();
   ensureSchemaIndexes();
 }
 
@@ -172,10 +174,63 @@ function ensureMintForeignKey() {
 
 function ensureSchemaIndexes() {
   db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_mints_txid ON mints(txid);
+    DROP INDEX IF EXISTS idx_mints_txid;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mints_txid_ci ON mints(txid COLLATE NOCASE);
     CREATE INDEX IF NOT EXISTS idx_mints_pool_id ON mints(pool_id);
+    CREATE INDEX IF NOT EXISTS idx_mints_confirmed ON mints(confirmed, created_at DESC);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pools_symbol_uc ON pools(UPPER(symbol));
   `);
+}
+
+function normalizeMintTxids() {
+  const rows = db
+    .prepare(`SELECT id, txid, created_at FROM mints WHERE txid IS NOT NULL`)
+    .all() as Array<{ id: string; txid: string; created_at: string }>; 
+  if (!rows.length) {
+    console.log(`[DB] lowercased txids: 0; dups fixed: 0`);
+    return;
+  }
+
+  const tx = db.transaction(() => {
+    const byNorm = new Map<string, Array<{ id: string; txid: string; created_at: string }>>();
+    for (const row of rows) {
+      const norm = String(row.txid || "").toLowerCase();
+      if (!byNorm.has(norm)) byNorm.set(norm, []);
+      byNorm.get(norm)!.push(row);
+    }
+
+    let dupsFixed = 0;
+    const updateTxid = db.prepare(`UPDATE mints SET txid = ? WHERE id = ?`);
+
+    for (const group of byNorm.values()) {
+      if (group.length <= 1) continue;
+      group.sort((a, b) => {
+        const aTs = Date.parse(a.created_at ?? "");
+        const bTs = Date.parse(b.created_at ?? "");
+        if (Number.isFinite(bTs) && Number.isFinite(aTs) && bTs !== aTs) {
+          return bTs - aTs;
+        }
+        return b.id.localeCompare(a.id);
+      });
+      const rest = group.slice(1);
+      for (const row of rest) {
+        const suffix = String(row.id || "").slice(0, 6) || crypto.randomBytes(3).toString("hex");
+        const newTxid = `${row.txid}${suffix ? `dup${suffix}` : "dup"}`;
+        updateTxid.run(newTxid, row.id);
+        dupsFixed += 1;
+        console.log(`[DB] duplicate txid normalized id=${row.id} old=${row.txid} new=${newTxid}`);
+      }
+    }
+
+    const lowerResult = db.prepare(`UPDATE mints SET txid = LOWER(txid) WHERE txid GLOB '[A-F]'`).run();
+    console.log(`[DB] lowercased txids: ${lowerResult.changes}; dups fixed: ${dupsFixed}`);
+  });
+
+  try {
+    tx();
+  } catch (err: any) {
+    throw new Error(`mint_txid_normalize_failed: ${String(err?.message || err)}`);
+  }
 }
 
 // -----------------------------------------------------------------------------
