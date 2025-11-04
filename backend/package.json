@@ -3,8 +3,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "tsx -r dotenv/config src/api/server.ts",
-    "indexer": "tsx -r dotenv/config src/indexer/indexer.ts",
+    "dev": "tsx src/api/server.ts",
+    "indexer": "tsx src/indexer/indexer.ts",
     "test:mint": "tsx test/mint.integration.test.ts"
   },
   "dependencies": {
