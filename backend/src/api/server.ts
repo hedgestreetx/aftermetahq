@@ -8,7 +8,7 @@ import apiRoutes from "./routes";
 import mintRouter from "./mintTestnet";
 
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
-import { migrate } from "../lib/db";
+import { db, migrate } from "../lib/db";
 migrate();
 console.log(`[ENV] network=${ENV.NETWORK}`);
 
@@ -83,7 +83,37 @@ async function queryStatus(txid: string): Promise<{ confirmed: boolean; confs: n
   return { confirmed, confs: Number.isFinite(confs) ? confs : confirmed ? 1 : 0 };
 }
 
+const pendingMintStmt = db.prepare(
+  `SELECT txid
+     FROM mints
+    WHERE confirmed = 0
+      AND length(txid) = 64
+      AND txid GLOB '[0-9A-Fa-f]*'
+    ORDER BY created_at DESC
+    LIMIT 200`
+);
+const markMintConfirmedStmt = db.prepare(`UPDATE mints SET confirmed = 1 WHERE txid = ?`);
+
+function seedPendingMints() {
+  const now = Date.now();
+  const rows = pendingMintStmt.all() as Array<{ txid: string }>;
+  for (const { txid } of rows) {
+    if (!txCache.has(txid)) {
+      txCache.set(txid, {
+        txid,
+        confirmed: false,
+        confs: 0,
+        nextCheckAt: now,
+        attempts: 0,
+      });
+    }
+  }
+}
+
+seedPendingMints();
+
 setInterval(async () => {
+  seedPendingMints();
   const now = Date.now();
   for (const s of txCache.values()) {
     if (s.confirmed || s.nextCheckAt > now) continue;
@@ -91,6 +121,16 @@ setInterval(async () => {
       const { confirmed, confs } = await queryStatus(s.txid);
       s.error = undefined;
       s.attempts++;
+      if (confirmed && !s.confirmed) {
+        try {
+          const result = markMintConfirmedStmt.run(s.txid);
+          if (result.changes > 0) {
+            console.log(`[TX] confirmed mint txid=${s.txid}`);
+          }
+        } catch (err: any) {
+          console.error(`[_tx] failed to mark mint confirmed txid=${s.txid}: ${String(err?.message || err)}`);
+        }
+      }
       s.confirmed = confirmed;
       s.confs = confs;
       s.nextCheckAt = confirmed ? Number.POSITIVE_INFINITY : now + nextDelayMs(s.attempts);

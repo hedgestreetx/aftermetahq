@@ -20,10 +20,65 @@ const FEE_PER_KB = ENV.FEE_PER_KB || 150;
 const BASE58_RX = /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/;
 const NET_WOC = ENV.NETWORK === "mainnet" ? "main" : "test"; // WOC URL segment
 const WOC_ROOT = ENV.WOC_BASE || `https://api.whatsonchain.com/v1/bsv/${NET_WOC}`;
+const WOC_STATUS_URL = (txid: string) => `${WOC_ROOT}/tx/${txid}/status`;
 
 const nowMs = () => Date.now();
 const isTxid = (s: string) => typeof s === "string" && /^[0-9a-fA-F]{64}$/.test(s);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const markMintConfirmedStmt = db.prepare(`UPDATE mints SET confirmed=1 WHERE txid=?`);
+
+async function refreshMintConfirmations(rows: Array<{ txid: string; confirmed: number }>) {
+  const toVerify = Array.from(
+    new Set(
+      rows
+        .filter((row) => row && !row.confirmed && isTxid(row.txid || ""))
+        .map((row) => row.txid as string)
+    )
+  );
+
+  if (!toVerify.length) return;
+
+  const updates = new Map<string, boolean>();
+
+  for (const [idx, txid] of toVerify.entries()) {
+    try {
+      const resp = await fetch(WOC_STATUS_URL(txid));
+      if (!resp.ok) {
+        continue;
+      }
+      const body = (await resp.json().catch(() => ({} as any))) as any;
+      const confirmed = Boolean(body?.confirmed ?? body?.isConfirmed ?? false);
+      updates.set(txid, confirmed);
+      if (confirmed) {
+        try {
+          markMintConfirmedStmt.run(txid);
+        } catch (err: any) {
+          console.error(
+            `[mints] failed to mark mint confirmed txid=${txid} err=${String(err?.message || err)}`
+          );
+        }
+      }
+    } catch (err: any) {
+      console.error(`[mints] failed to query status for txid=${txid} err=${String(err?.message || err)}`);
+    }
+
+    if (idx < toVerify.length - 1) {
+      await sleep(150);
+    }
+  }
+
+  if (!updates.size) return;
+
+  for (const row of rows) {
+    if (!row || row.confirmed) continue;
+    const txid = row.txid as string;
+    if (!txid) continue;
+    if (updates.has(txid)) {
+      row.confirmed = updates.get(txid) ? 1 : 0;
+    }
+  }
+}
 
 type QuoteSnapshot = {
   poolId: string;
@@ -741,7 +796,7 @@ const mintHandler = async (req: any, res: any) => {
   }
 };
 
-r.get("/", (req, res) => {
+r.get("/", async (req, res) => {
   try {
     const limit = clamp(Number(req.query.limit ?? 50), 1, 500);
     const qPoolId = typeof req.query.poolId === "string" ? req.query.poolId.trim() : "";
@@ -777,7 +832,19 @@ r.get("/", (req, res) => {
          ORDER BY m.created_at DESC
          LIMIT ?`
       )
-      .all(...params, limit) as any[];
+      .all(...params, limit) as Array<{
+        id: string;
+        poolId: string;
+        symbol: string;
+        account: string;
+        spendSats: number;
+        tokens: number;
+        txid: string;
+        confirmed: number;
+        createdAt: string;
+      }>;
+
+    await refreshMintConfirmations(rows);
 
     res.json({ ok: true, mints: rows, nextCursor: null });
   } catch (e: any) {
