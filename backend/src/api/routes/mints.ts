@@ -26,19 +26,22 @@ const DUST = DUST_SATS;
 const FEE_PER_KB = ENV.FEE_PER_KB || 150;
 
 const BASE58_RX = /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/;
-const WOC_ROOT = WOC_BASE;
+const NET_WOC = ENV.NETWORK === "mainnet" ? "main" : "test"; // WOC URL segment
+const WOC_ROOT = ENV.WOC_BASE || `https://api.whatsonchain.com/v1/bsv/${NET_WOC}`;
+const WOC_STATUS_URL = (txid: string) => `${WOC_ROOT}/tx/${txid}/status`;
 
 const nowMs = () => Date.now();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const markMintConfirmedStmt = db.prepare(`UPDATE mints SET confirmed=1 WHERE txid=?`);
 
 async function refreshMintConfirmations(rows: Array<{ txid: string; confirmed: number }>) {
   const toVerify = Array.from(
     new Set(
       rows
-        .filter((row) => row && !row.confirmed)
-        .map((row) => normalizeTxid(row.txid as string))
-        .filter((txid) => isTxid(txid)),
-    ),
+        .filter((row) => row && !row.confirmed && isTxid(row.txid || ""))
+        .map((row) => row.txid as string)
+    )
   );
 
   if (!toVerify.length) return;
@@ -47,19 +50,19 @@ async function refreshMintConfirmations(rows: Array<{ txid: string; confirmed: n
 
   for (const [idx, txid] of toVerify.entries()) {
     try {
-      const status = await loadMintStatus(txid);
-      if (!status.ok) {
+      const resp = await fetch(WOC_STATUS_URL(txid));
+      if (!resp.ok) {
         continue;
       }
-      updates.set(status.txid, status.confirmed);
-      if (status.confirmed) {
+      const body = (await resp.json().catch(() => ({} as any))) as any;
+      const confirmed = Boolean(body?.confirmed ?? body?.isConfirmed ?? false);
+      updates.set(txid, confirmed);
+      if (confirmed) {
         try {
-          markMintConfirmed(status.txid);
+          markMintConfirmedStmt.run(txid);
         } catch (err: any) {
           console.error(
-            `[mints] failed to mark mint confirmed txid=${status.txid} err=${String(
-              err?.message || err,
-            )}`,
+            `[mints] failed to mark mint confirmed txid=${txid} err=${String(err?.message || err)}`
           );
         }
       }
@@ -76,12 +79,11 @@ async function refreshMintConfirmations(rows: Array<{ txid: string; confirmed: n
 
   for (const row of rows) {
     if (!row || row.confirmed) continue;
-    const txid = normalizeTxid(row.txid as string);
+    const txid = row.txid as string;
     if (!txid) continue;
     if (updates.has(txid)) {
       row.confirmed = updates.get(txid) ? 1 : 0;
     }
-    row.txid = txid;
   }
 }
 
