@@ -1,23 +1,40 @@
 import WebSocket from 'ws';
-import { ENV } from './env';
-import { db } from './db';
 import fetch from 'node-fetch';
 
-const WOC_URL = 'wss://socket.whatsonchain.com/mempool';
+import { ENV } from './env';
+import { db } from './db';
+
+const NET_WOC =
+  ENV.NETWORK === 'mainnet' || ENV.NETWORK === 'livenet' ? 'main' : 'test';
+export const WOC_BASE =
+  ENV.WOC_BASE || `https://api.whatsonchain.com/v1/bsv/${NET_WOC}`;
+const WOC_URL = `wss://socket.whatsonchain.com/mempool`; // same endpoint for all nets
 
 let ws: WebSocket | null = null;
 
 const markMintConfirmedStmt = db.prepare(`UPDATE mints SET confirmed = 1 WHERE txid = ?`);
 
 function connect() {
-  ws = new WebSocket(WOC_URL, {
-    headers: {
-      'WOC-API-KEY': ENV.WOC_API_KEY,
-    },
-  });
+  const headers: Record<string, string> = {};
+  if (ENV.WOC_API_KEY) {
+    headers['WOC-API-KEY'] = ENV.WOC_API_KEY;
+  }
+
+  ws = new WebSocket(WOC_URL, { headers });
 
   ws.on('open', () => {
     console.log('[WOC] WebSocket connected');
+    try {
+      ws?.send(
+        JSON.stringify({
+          network: NET_WOC,
+          event: 'subscribe',
+          channel: 'mempool_tx',
+        })
+      );
+    } catch (err) {
+      console.error('[WOC] failed to subscribe to mempool channel', err);
+    }
   });
 
   ws.on('message', (data: WebSocket.Data) => {
@@ -50,11 +67,12 @@ function connect() {
 }
 
 export async function queryWocTxStatus(txid: string) {
-  const res = await fetch(`https://api.whatsonchain.com/v1/bsv/main/tx/${txid}/status`, {
-    headers: {
-      'WOC-API-KEY': ENV.WOC_API_KEY,
-    }
-  });
+  const headers: Record<string, string> = {};
+  if (ENV.WOC_API_KEY) {
+    headers['WOC-API-KEY'] = ENV.WOC_API_KEY;
+  }
+
+  const res = await fetch(`${WOC_BASE}/tx/${txid}/status`, { headers });
   if (!res.ok) {
     return {
       ok: false,
