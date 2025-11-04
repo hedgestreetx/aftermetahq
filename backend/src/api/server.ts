@@ -10,7 +10,7 @@ import mintRouter from "./mintTestnet";
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
 import { db, migrate } from "../lib/db";
 migrate();
-console.log(`[ENV] network=${ENV.NETWORK}`);
+console.log(`[NET] network=${ENV.NETWORK} NET_WOC=${NET_WOC}`);
 
 // ----------------------------- App & Middleware -----------------------------
 const app = express();
@@ -139,44 +139,8 @@ setInterval(async () => {
       s.attempts++;
       s.nextCheckAt = now + nextDelayMs(s.attempts);
     }
-  }
-}, 5000);
-
-const txRouter = express.Router();
-txRouter.post("/tx/watch", (req, res) => {
-  const txid = String(req.body?.txid || "").trim();
-  if (!/^[0-9a-f]{64}$/i.test(txid)) {
-    return res.status(400).json({ ok: false, error: "invalid txid" });
-  }
-  if (!txCache.has(txid)) {
-    txCache.set(txid, {
-      txid,
-      confirmed: false,
-      confs: 0,
-      nextCheckAt: Date.now(),
-      attempts: 0,
-    });
-  }
-  res.json({ ok: true });
-});
-txRouter.get("/tx/:txid/status", (req, res) => {
-  const txid = String(req.params.txid || "").trim();
-  const s = txCache.get(txid);
-  if (!s) return res.status(404).json({ ok: false, error: "unknown txid" });
-  res.json({
-    ok: true,
-    txid: s.txid,
-    confirmed: s.confirmed,
-    confs: s.confs,
-    nextCheckAt: s.nextCheckAt,
-    attempts: s.attempts,
-    error: s.error ?? null,
-  });
-});
-
-// Mount watcher at both /api and /
-app.use("/api", txRouter);
-app.use("/", txRouter);
+  }, interval);
+}
 
 // ----------------------------- Routers -----------------------------
 // Mount at root and /api so /v1/* and /api/v1/* both work.

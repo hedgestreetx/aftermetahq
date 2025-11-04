@@ -4,10 +4,18 @@ import { bsv } from "scrypt-ts";
 
 import { db } from "../../lib/db";
 import { ENV } from "../../lib/env";
+import {
+  isTxid,
+  loadMintStatus,
+  markMintConfirmed,
+  normalizeTxid,
+  verifyPendingMints,
+} from "../../lib/mintVerifier";
 import { appendLedger, refreshSupply } from "../../lib/ledger";
 import { calcTokens, DUST_SATS, estimateFee, MintUtxo, selectUtxos } from "../../lib/txutil";
 import { recordQuote } from "../../lib/quoteStore";
 import { idempotency, persistResult } from "../idempotency";
+import { WOC_BASE } from "../../lib/woc";
 
 const r = Router();
 
@@ -23,7 +31,6 @@ const WOC_ROOT = ENV.WOC_BASE || `https://api.whatsonchain.com/v1/bsv/${NET_WOC}
 const WOC_STATUS_URL = (txid: string) => `${WOC_ROOT}/tx/${txid}/status`;
 
 const nowMs = () => Date.now();
-const isTxid = (s: string) => typeof s === "string" && /^[0-9a-fA-F]{64}$/.test(s);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const markMintConfirmedStmt = db.prepare(`UPDATE mints SET confirmed=1 WHERE txid=?`);
@@ -726,7 +733,8 @@ const mintHandler = async (req: any, res: any) => {
     poolIdForLog = quote.pool.id;
     symbolForLog = quote.pool.symbol;
 
-    const txid = await broadcastRawTx(quote.raw);
+    const txidRaw = await broadcastRawTx(quote.raw);
+    const txid = normalizeTxid(txidRaw);
     const { visible, attempts } = await waitVisibleNonFatal(txid);
 
     const guard = db.prepare(`SELECT 1 FROM pools WHERE id=?`).get(quote.pool.id) as any;
@@ -735,7 +743,9 @@ const mintHandler = async (req: any, res: any) => {
     }
 
     const tokens = quote.tokens;
-    const existing = db.prepare(`SELECT id FROM mints WHERE txid=?`).get(txid) as any;
+    const existing = db
+      .prepare(`SELECT id FROM mints WHERE txid=? COLLATE NOCASE`)
+      .get(txid) as any;
     const base = {
       ok: true,
       txid,
@@ -764,7 +774,9 @@ const mintHandler = async (req: any, res: any) => {
         throw new MintError("pool_fk_missing");
       }
       if (msg.includes("UNIQUE") && msg.includes("mints") && msg.includes("txid")) {
-        const row = db.prepare(`SELECT id FROM mints WHERE txid=?`).get(txid) as any;
+        const row = db
+          .prepare(`SELECT id FROM mints WHERE txid=? COLLATE NOCASE`)
+          .get(txid) as any;
         const dupOut2 = { ...base, id: row?.id || id };
         persistResult(req, dupOut2, "MINT_REAL_DUP2", body);
         return res.json(dupOut2);
@@ -775,9 +787,7 @@ const mintHandler = async (req: any, res: any) => {
     appendLedger(quote.pool.id, quote.fromAddress, quote.pool.symbol, tokens, "MINT_FILL");
     refreshSupply(quote.pool.id, quote.pool.symbol);
 
-    console.log(
-      `[MINT] success poolId=${quote.pool.id} symbol=${quote.pool.symbol} from=${quote.fromAddress} spendSats=${quote.spend} fee=${quote.fee} txid=${txid}`,
-    );
+    console.log(`[MINT] ok pool=${quote.pool.id} sym=${quote.pool.symbol} tx=${txid}`);
 
     const out = { ...base, id };
     persistResult(req, out, "MINT_REAL", body);
@@ -854,32 +864,8 @@ r.get("/", async (req, res) => {
 
 r.post("/verify", async (_req, res) => {
   try {
-    const candidates = db
-      .prepare(
-        `SELECT txid FROM mints
-          WHERE confirmed=0 AND length(txid)=64 AND txid GLOB '[0-9A-Fa-f]*'
-          ORDER BY created_at DESC
-          LIMIT 50`
-      )
-      .all() as Array<{ txid: string }>;
-
-    let flipped = 0;
-    for (const { txid } of candidates) {
-      try {
-        const r2 = await fetch(`https://api.whatsonchain.com/v1/bsv/${NET_WOC}/tx/${txid}/status`);
-        if (r2.ok) {
-          const s = await r2.json().catch(() => ({} as any));
-          if (s?.confirmed) {
-            db.prepare(`UPDATE mints SET confirmed=1 WHERE txid=?`).run(txid);
-            flipped++;
-          }
-        }
-      } catch {
-        // ignore network errors
-      }
-    }
-
-    res.json({ ok: true, network: ENV.NETWORK, flipped });
+    const { checked, flipped } = await verifyPendingMints(100);
+    res.json({ ok: true, checked, flipped });
   } catch (e: any) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
