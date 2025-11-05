@@ -1,7 +1,22 @@
+import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 
-dotenv.config({ path: path.resolve(process.cwd(), "backend/.env") });
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
+const CANDIDATE_ENV_PATHS = [
+  path.resolve(process.cwd(), "backend/.env"),
+  path.resolve(process.cwd(), ".env"),
+  path.resolve(moduleDir, "../../.env"),
+];
+
+for (const candidate of CANDIDATE_ENV_PATHS) {
+  if (fs.existsSync(candidate)) {
+    dotenv.config({ path: candidate });
+    break;
+  }
+}
 
 type Net = "testnet" | "mainnet";
 const normalizeNet = (v?: string): Net =>
@@ -11,10 +26,12 @@ export const ENV = {
   NETWORK: normalizeNet(process.env.NETWORK),
   PORT: Number(process.env.PORT || 3000),
   FEE_PER_KB: Number(process.env.FEE_PER_KB || 150),
+  FEE_RATE_SATS_PER_BYTE: Number(process.env.FEE_RATE_SATS_PER_BYTE || 0),
   MIN_CONFIRMATIONS: Number(process.env.MIN_CONFIRMATIONS || 0),
   VERIFY_INTERVAL_MS: Number(process.env.VERIFY_INTERVAL_MS || 0),
 
   ALLOW_DEV_BUY: String(process.env.ALLOW_DEV_BUY || "").toLowerCase() === "true",
+  DEV_BUY_WIF: String(process.env.DEV_BUY_WIF || "").trim(),
   REQUIRE_MIN_CONFS: Number(process.env.REQUIRE_MIN_CONFS || 0),
   MAX_SLIPPAGE_BPS: Number(process.env.MAX_SLIPPAGE_BPS || 500),
 

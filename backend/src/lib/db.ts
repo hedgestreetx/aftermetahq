@@ -14,8 +14,18 @@ const __dirname = path.dirname(__filename);
 // backend root = two levels up from this file (backend/src/lib -> backend)
 const BACKEND_ROOT = path.resolve(__dirname, "..", "..");
 
-// DB lives at backend/aftermeta.db (sibling to package.json)
-const DB_PATH = path.resolve(BACKEND_ROOT, "aftermeta.db");
+const envDbPath = process.env.AFTERMETA_DB_PATH;
+const DB_PATH = (() => {
+  if (!envDbPath) {
+    return path.resolve(BACKEND_ROOT, "aftermeta.db");
+  }
+
+  if (envDbPath === ":memory:" || envDbPath.startsWith("file:")) {
+    return envDbPath;
+  }
+
+  return path.resolve(envDbPath);
+})();
 
 // Default migration lives at backend/migrations/001_init.sql
 const MIGRATIONS_DIR = path.resolve(BACKEND_ROOT, "migrations");
@@ -39,7 +49,9 @@ function readFileIfExists(p: string): Buffer | null {
 // -----------------------------------------------------------------------------
 // Open DB (create parent dir if needed), enforce pragmas *before* any writes
 // -----------------------------------------------------------------------------
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+if (!DB_PATH.startsWith(":memory:")) {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+}
 
 export const db = new Database(DB_PATH);
 
@@ -124,6 +136,7 @@ export function migrate(): void {
   ensureMintForeignKey();
   normalizeMintTxids();
   ensureSchemaIndexes();
+  ensureBuySchema();
 }
 
 function ensureMintForeignKey() {
@@ -179,6 +192,33 @@ function ensureSchemaIndexes() {
     CREATE INDEX IF NOT EXISTS idx_mints_pool_id ON mints(pool_id);
     CREATE INDEX IF NOT EXISTS idx_mints_confirmed ON mints(confirmed, created_at DESC);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pools_symbol_uc ON pools(UPPER(symbol));
+  `);
+}
+
+function ensureBuySchema() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS buys (
+      id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      request_hash TEXT NOT NULL,
+      from_address TEXT NOT NULL,
+      to_address TEXT NOT NULL,
+      amount_sats INTEGER NOT NULL,
+      slippage_pct REAL NOT NULL,
+      txid TEXT,
+      fee_sats INTEGER,
+      change_sats INTEGER,
+      input_count INTEGER,
+      output_count INTEGER,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL,
+      error TEXT,
+      created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+      updated_at DATETIME NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(txid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_buys_status ON buys(status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_buys_txid ON buys(txid);
   `);
 }
 
