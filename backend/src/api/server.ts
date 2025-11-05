@@ -93,9 +93,4 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   res.status(code).json({ ok: false, error: msg });
 });
 
-// ----------------------------- Boot -----------------------------
-const PORT = Number(ENV.PORT || 3000);
-app.listen(PORT, () => {
-  console.log(`✅ Backend running on http://localhost:${PORT}`);
-  startWocSocket();
-});
+await bootstrap();
