@@ -10,14 +10,7 @@
     "strict": true,
     "types": ["node"],
     "moduleDetection": "force",
-    "allowSyntheticDefaultImports": true,
-    "baseUrl": "./",
-    "paths": {
-      "supertest": ["src/testUtils/supertest"],
-      "supertest/*": ["src/testUtils/supertest"],
-      "vitest": ["src/testUtils/vitest-shim"],
-      "vitest/*": ["src/testUtils/vitest-shim"]
-    }
+    "allowSyntheticDefaultImports": true
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }
