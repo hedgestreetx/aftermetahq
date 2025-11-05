@@ -19,18 +19,13 @@ export function wocApiNetworkSegment(network = ENV.NETWORK): "main" | "test" | "
   return "test";
 }
 
-export function wocApiBase(network = ENV.NETWORK): string {
-  const segment = wocApiNetworkSegment(network);
-  return `https://api.whatsonchain.com/v1/bsv/${segment}`;
-}
-
 export function wocWebTxUrl(txid: string, network = ENV.NETWORK): string {
   const net = normalizeWocNetwork(network);
-  if (net === "stn") {
-    return `https://stn.whatsonchain.com/tx/${txid}`;
-  }
-  if (net === "mainnet") {
-    return `https://whatsonchain.com/tx/${txid}`;
-  }
-  return `https://test.whatsonchain.com/tx/${txid}`;
+  const base =
+    net === "mainnet"
+      ? "https://whatsonchain.com/tx"
+      : net === "stn"
+      ? "https://stn.whatsonchain.com/tx"
+      : "https://test.whatsonchain.com/tx";
+  return `${base}/${txid}`;
 }
