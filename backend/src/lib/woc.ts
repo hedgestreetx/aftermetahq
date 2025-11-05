@@ -1,9 +1,10 @@
+import WebSocket from "ws";
 import fetch from "node-fetch";
 
 import { ENV } from "./env";
-import * as wocUrls from "./wocUrls";
+import { db } from "./db";
 
-const NET_WOC = wocUrls.wocApiNetworkSegment();
+const NET_WOC = wocApiNetworkSegment();
 export const WOC_BASE =
   ENV.WOC_BASE || `https://api.whatsonchain.com/v1/bsv/${NET_WOC}`;
 
@@ -20,6 +21,57 @@ function buildHeaders(extra: Record<string, string> = {}) {
     headers["WOC-API-KEY"] = ENV.WOC_API_KEY;
   }
   return headers;
+}
+
+let ws: WebSocket | null = null;
+
+const markMintConfirmedStmt = db.prepare(`UPDATE mints SET confirmed = 1 WHERE txid = ?`);
+
+function connect() {
+  ws = new WebSocket(WOC_URL, { headers: buildHeaders() });
+
+  ws.on('open', () => {
+    console.log('[WOC] WebSocket connected');
+    try {
+      ws?.send(
+        JSON.stringify({
+          network: NET_WOC,
+          event: 'subscribe',
+          channel: 'mempool_tx',
+        })
+      );
+    } catch (err) {
+      console.error('[WOC] failed to subscribe to mempool channel', err);
+    }
+  });
+
+  ws.on('message', (data: WebSocket.Data) => {
+    const message = JSON.parse(data.toString());
+    if (message.type === 'tx' && message.payload) {
+      const { txid, status } = message.payload;
+      if (status === 'confirmed') {
+        try {
+          const result = markMintConfirmedStmt.run(txid);
+          if (result.changes > 0) {
+            console.log(`[WOC] Confirmed transaction: ${txid}`);
+          }
+        } catch (err: any) {
+          console.error(`[WOC] failed to mark mint confirmed txid=${txid}: ${String(err?.message || err)}`);
+        }
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('[WOC] WebSocket disconnected');
+    ws = null;
+    // Reconnect after a delay
+    setTimeout(connect, 5000);
+  });
+
+  ws.on('error', (error: Error) => {
+    console.error('[WOC] WebSocket error:', error);
+  });
 }
 
 export async function queryWocTxStatus(txid: string) {
@@ -43,6 +95,14 @@ export async function queryWocTxStatus(txid: string) {
     blockHeight: data.block_height,
     error: undefined,
   };
+}
+
+export function startWocSocket() {
+  if (!ENV.WOC_API_KEY) {
+    console.warn("[WOC] WOC_API_KEY not set, WebSocket will not be connected.");
+    return;
+  }
+  connect();
 }
 
 export async function fetchAddressUtxos(address: string) {
