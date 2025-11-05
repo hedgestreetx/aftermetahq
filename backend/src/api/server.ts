@@ -19,15 +19,36 @@ const app = express();
 
 app.set("trust proxy", 1);
 
+const DEFAULT_CORS_ORIGINS = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:4173",
+  "http://127.0.0.1:4173",
+];
+
+const configuredOrigins = (process.env.CORS_ORIGINS || DEFAULT_CORS_ORIGINS.join(","))
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const normalizeOrigin = (value: string) => {
+  try {
+    const url = new URL(value);
+    return url.origin.replace(/\/+$/, "");
+  } catch {
+    return value.replace(/\/+$/, "");
+  }
+};
+
+const allowedOrigins = new Set(configuredOrigins.map(normalizeOrigin));
+const allowAllOrigins = allowedOrigins.has("*");
+
 app.use(
   cors({
     origin: (origin, cb) => {
-      const allow = (process.env.CORS_ORIGINS || "http://localhost:5173")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (!origin) return cb(null, true); // curl/postman
-      cb(null, allow.includes(origin));
+      if (!origin || allowAllOrigins) return cb(null, true); // curl/postman or wildcard config
+      const normalized = normalizeOrigin(origin);
+      cb(null, allowedOrigins.has(normalized));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "X-Request-Id"],
