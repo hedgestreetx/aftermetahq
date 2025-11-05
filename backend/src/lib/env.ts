@@ -18,9 +18,15 @@ for (const candidate of CANDIDATE_ENV_PATHS) {
   }
 }
 
-type Net = "testnet" | "mainnet";
-const normalizeNet = (v?: string): Net =>
-  (v || "").toLowerCase().startsWith("main") ? "mainnet" : "testnet";
+type Net = "testnet" | "mainnet" | "stn";
+const normalizeNet = (v?: string): Net => {
+  const value = String(v || "").trim().toLowerCase();
+  if (!value) return "testnet";
+  if (value.startsWith("main")) return "mainnet";
+  if (value === "livenet") return "mainnet";
+  if (value === "stn" || value === "scale" || value === "scalenet") return "stn";
+  return "testnet";
+};
 
 export const ENV = {
   NETWORK: normalizeNet(process.env.NETWORK),
