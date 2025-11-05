@@ -69,10 +69,7 @@ function connect() {
     setTimeout(connect, 5000);
   });
 
-  ws.on('error', (error: Error) => {
-    console.error('[WOC] WebSocket error:', error);
-  });
-}
+let overrides: WocOverrides | null = null;
 
 export async function queryWocTxStatus(txid: string) {
   const res = await fetch(`${WOC_BASE}/tx/${txid}/status`, { headers: buildHeaders() });
