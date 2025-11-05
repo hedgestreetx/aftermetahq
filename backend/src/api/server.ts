@@ -7,37 +7,9 @@ import { ENV } from "../lib/env";
 import apiRoutes from "./routes";
 import mintRouter from "./mintTestnet";
 import { startWocSocket } from "../lib/woc";
-const dbModule = await import("../lib/db");
-const migrate = dbModule.migrate;
-if (typeof migrate !== "function") {
-  throw new Error("Database migrate() helper was not exported correctly");
-}
-
-async function loadExpress() {
-  try {
-    return await import("express");
-  } catch (error: any) {
-    if (error?.code === "ERR_MODULE_NOT_FOUND") {
-      console.error(
-        "❌ The 'express' dependency is missing. Run `npm install` in the backend directory before starting the server."
-      );
-    }
-
-    throw error;
-  }
-}
-
-const expressModule: typeof import("express") = await loadExpress();
-const createExpressApp = expressModule.default;
-const expressJson: typeof import("express").json = (() => {
-  const jsonFn = expressModule.json ?? createExpressApp.json;
-  if (typeof jsonFn === "function") return jsonFn.bind(createExpressApp);
-
-  throw new Error("Express JSON body parser could not be loaded");
-})();
 
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
-await Promise.resolve(migrate());
+migrate();
 const NET_WOC = ENV.NETWORK === "mainnet" || ENV.NETWORK === "livenet" ? "main" : "test";
 console.log(`[NET] network=${ENV.NETWORK} NET_WOC=${NET_WOC}`);
 
