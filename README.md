@@ -1,4 +1,4 @@
-# Aftermeta — Day 10 Baseline (Clean Reset)
+# Aftermeta
 
 This is a **clean, minimal baseline** for the Aftermeta app to get you unstuck.
 
