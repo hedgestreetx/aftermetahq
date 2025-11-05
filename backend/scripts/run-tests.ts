@@ -19,8 +19,10 @@ function collectSpecs(dir: string, out: string[]) {
 }
 
 async function loadSpecs(files: string[]) {
+  let version = 0;
   for (const file of files) {
-    const url = pathToFileURL(file).href;
+    const base = pathToFileURL(file).href;
+    const url = `${base}?v=${version++}`;
     await import(url);
   }
 }

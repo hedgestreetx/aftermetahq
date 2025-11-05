@@ -89,6 +89,10 @@ class RequestBuilder {
   post(path: string) {
     return new TestRequest(this.app, "POST", path);
   }
+
+  get(path: string) {
+    return new TestRequest(this.app, "GET", path);
+  }
 }
 
 export default function request(app: Express) {

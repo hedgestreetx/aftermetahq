@@ -1,50 +1,89 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+
 import dotenv from "dotenv";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(moduleDir, "..", "..");
 
-const CANDIDATE_ENV_PATHS = [
-  path.resolve(process.cwd(), "backend/.env"),
-  path.resolve(process.cwd(), ".env"),
-  path.resolve(moduleDir, "../../.env"),
+const ENV_PATHS = [
+  path.resolve(projectRoot, "backend/.env"),
+  path.resolve(projectRoot, ".env"),
 ];
 
-for (const candidate of CANDIDATE_ENV_PATHS) {
+for (const candidate of ENV_PATHS) {
   if (fs.existsSync(candidate)) {
     dotenv.config({ path: candidate });
     break;
   }
 }
 
-type Net = "testnet" | "mainnet" | "stn";
-const normalizeNet = (v?: string): Net => {
-  const value = String(v || "").trim().toLowerCase();
-  if (!value) return "testnet";
-  if (value.startsWith("main")) return "mainnet";
-  if (value === "livenet") return "mainnet";
-  if (value === "stn" || value === "scale" || value === "scalenet") return "stn";
-  return "testnet";
+type Network = "mainnet" | "testnet" | "stn";
+
+type EnvConfig = {
+  NODE_ENV: string;
+  NETWORK: Network;
+  PORT: number;
+  DB_PATH: string;
+  WOC_API_KEY?: string;
+  WOC_BASE?: string;
+  CORS_ORIGINS: string[];
 };
 
-export const ENV = {
-  NETWORK: normalizeNet(process.env.NETWORK),
-  PORT: Number(process.env.PORT || 3000),
-  FEE_PER_KB: Number(process.env.FEE_PER_KB || 150),
-  FEE_RATE_SATS_PER_BYTE: Number(process.env.FEE_RATE_SATS_PER_BYTE || 0),
-  MIN_CONFIRMATIONS: Number(process.env.MIN_CONFIRMATIONS || 0),
-  VERIFY_INTERVAL_MS: Number(process.env.VERIFY_INTERVAL_MS || 0),
+function normalizeNetwork(value?: string | null): Network {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return "testnet";
+  if (raw === "livenet" || raw.startsWith("main")) return "mainnet";
+  if (raw === "stn" || raw === "scale" || raw === "scalenet") return "stn";
+  if (raw === "test" || raw === "testnet") return "testnet";
+  return "testnet";
+}
 
-  ALLOW_DEV_BUY: String(process.env.ALLOW_DEV_BUY || "").toLowerCase() === "true",
-  DEV_BUY_WIF: String(process.env.DEV_BUY_WIF || "").trim(),
-  REQUIRE_MIN_CONFS: Number(process.env.REQUIRE_MIN_CONFS || 0),
-  MAX_SLIPPAGE_BPS: Number(process.env.MAX_SLIPPAGE_BPS || 500),
+function resolveDbPath(value?: string | null): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return path.resolve(projectRoot, "aftermeta.db");
+  }
+  if (raw === ":memory:" || raw.startsWith("file:")) {
+    return raw;
+  }
+  if (path.isAbsolute(raw)) {
+    return raw;
+  }
+  return path.resolve(projectRoot, raw);
+}
 
-  WOC_BASE: String(process.env.WOC_BASE || "").replace(/\/+$/, ""),
+function parseCorsOrigins(value?: string | null): string[] {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return [
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "http://localhost:4173",
+      "http://127.0.0.1:4173",
+    ];
+  }
+  return raw
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
 
-  POOL_P2SH_ADDRESS: String(process.env.POOL_P2SH_ADDRESS || "").trim(),
-  POOL_LOCKING_SCRIPT_HEX: String(process.env.POOL_LOCKING_SCRIPT_HEX || "").trim(),
+export function getEnv(): EnvConfig {
+  return {
+    NODE_ENV: String(process.env.NODE_ENV ?? "development"),
+    NETWORK: normalizeNetwork(process.env.NETWORK),
+    PORT: Number.parseInt(String(process.env.PORT ?? "3000"), 10) || 3000,
+    DB_PATH: resolveDbPath(process.env.DB_PATH ?? process.env.AFTERMETA_DB_PATH),
+    WOC_API_KEY: String(process.env.WOC_API_KEY ?? "").trim() || undefined,
+    WOC_BASE: String(process.env.WOC_BASE ?? "").trim() || undefined,
+    CORS_ORIGINS: parseCorsOrigins(process.env.CORS_ORIGINS),
+  };
+}
 
-  WOC_API_KEY: String(process.env.WOC_API_KEY || "").trim(),
-} as const;
+export function refreshEnv(): EnvConfig {
+  return getEnv();
+}
+
+export type NormalizedNetwork = ReturnType<typeof getEnv>["NETWORK"];
