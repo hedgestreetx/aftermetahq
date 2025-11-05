@@ -1,139 +1,114 @@
-// backend/src/api/server.ts
-import express, { json as expressJson, type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
 import crypto from "crypto";
+import express, { type NextFunction, type Request, type Response } from "express";
+import { pathToFileURL } from "url";
 
-import { ENV } from "../lib/env";
-import apiRoutes from "./routes";
-import mintRouter from "./mintTestnet";
-import { pollPendingMints } from "../lib/mintConfirmationPoller";
-import { wocApiNetworkSegment } from "../lib/wocUrls";
-// CHANGE THIS PATH to where your migrate function is exported from
-// for example "../lib/db" or "../db/migrate"
-import { migrate } from "../lib/db";
+import { getEnv } from "../lib/env";
+import { migrate } from "../lib/migrate";
+import { startMintConfirmationPoller } from "../lib/mintConfirmationPoller";
+import routes from "./routes";
+import { getDb } from "../lib/db";
 
-// ensure database is opened and migrations are applied exactly once on boot
-migrate();
-
-const NET_WOC = wocApiNetworkSegment();
-console.log(`[NET] network=${ENV.NETWORK} NET_WOC=${NET_WOC}`);
-
-// app and middleware
-const app = express();
-
-app.set("trust proxy", 1);
-
-const DEFAULT_CORS_ORIGINS = [
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:4173",
-  "http://127.0.0.1:4173",
-];
-
-const configuredOrigins = (process.env.CORS_ORIGINS || DEFAULT_CORS_ORIGINS.join(","))
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-const normalizeOrigin = (value: string) => {
+function normalizeOrigin(value: string): string {
   try {
     const url = new URL(value);
     return url.origin.replace(/\/+$/, "");
   } catch {
     return value.replace(/\/+$/, "");
   }
-};
-
-const allowedOrigins = new Set(configuredOrigins.map(normalizeOrigin));
-const allowAllOrigins = allowedOrigins.has("*");
-
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin || allowAllOrigins) return cb(null, true);
-      const normalized = normalizeOrigin(origin);
-      cb(null, allowedOrigins.has(normalized));
-    },
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "X-Request-Id"],
-    credentials: false,
-    maxAge: 86400,
-  })
-);
-
-app.use(expressJson({ limit: "1mb" }));
-
-app.use((req: Request, _res: Response, next: NextFunction) => {
-  (req as any).requestId =
-    (req.headers["x-request-id"] as string) ||
-    (req.headers["x-requestid"] as string) ||
-    crypto.randomUUID();
-  next();
-});
-
-// health
-function healthPayload() {
-  return { service: "aftermeta-backend", network: ENV.NETWORK, port: ENV.PORT };
 }
 
-app.get("/health", (_req, res) => {
-  res.status(200).json({ ok: true, ...healthPayload() });
-});
+function buildCorsConfig() {
+  const env = getEnv();
+  const allowed = new Set(env.CORS_ORIGINS.map(normalizeOrigin));
+  const allowAll = allowed.has("*");
 
-app.get("/api/health", (_req, res) => {
-  res.status(200).json({ ok: true, ...healthPayload() });
-});
+  return {
+    origin(origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (allowAll) {
+        return callback(null, true);
+      }
+      const normalized = normalizeOrigin(origin);
+      callback(null, allowed.has(normalized));
+    },
+    credentials: false,
+  } satisfies Parameters<typeof cors>[0];
+}
 
-// routers
-app.use(apiRoutes);
-app.use("/api", apiRoutes);
+export function createApp() {
+  const app = express();
 
-app.use(mintRouter);
-app.use("/api", mintRouter);
+  app.set("trust proxy", 1);
 
-// api 404s
-app.use("/api", (_req, res) => res.status(404).json({ ok: false, error: "not_found" }));
-app.use((_req, res) => res.status(404).type("text/plain").send("Not Found"));
-
-// error handler
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-  const code = Number(err?.status || err?.statusCode || 500);
-  const msg = String(err?.message || "internal_error");
-  res.status(code).json({ ok: false, error: msg });
-});
-
-async function bootstrap() {
-  startWocSocket();
-
-  const port = Number.isFinite(ENV.PORT) && ENV.PORT > 0 ? ENV.PORT : 3000;
-
-  const server = await new Promise<ReturnType<typeof app.listen>>((resolve, reject) => {
-    const listener = app.listen(port, () => {
-      console.log(`[API] listening on http://localhost:${port}`);
-      resolve(listener);
-    });
-    listener.on("error", (err) => reject(err));
+  app.use(cors(buildCorsConfig()));
+  app.use(express.json({ limit: "1mb" }));
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as Request & { id?: string }).id =
+      (req.headers["x-request-id"] as string) ||
+      (req.headers["x-requestid"] as string) ||
+      crypto.randomUUID();
+    next();
   });
 
-  const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
-  for (const signal of signals) {
-    process.once(signal, () => {
-      console.log(`[API] received ${signal}, shutting down`);
-      server.close((err) => {
-        if (err) {
-          console.error(`[API] error closing HTTP server`, err);
-          process.exit(1);
-        } else {
-          process.exit(0);
-        }
-      });
-    });
-  }
+  app.get("/health", (_req, res) => {
+    try {
+      const env = getEnv();
+      const db = getDb();
+      if (!(db as typeof db & { open?: boolean }).open) {
+        throw new Error("database_closed");
+      }
+      db.prepare("SELECT 1 as ok").get();
+      res.json({ ok: true, network: env.NETWORK, db: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const env = getEnv();
+      res.status(500).json({ ok: false, network: env.NETWORK, db: false, error: message });
+    }
+  });
+
+  app.use("/api", routes);
+
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ ok: false, error: "not_found" });
+  });
+
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const status = typeof (err as any)?.status === "number" ? (err as any).status : 500;
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(status).json({ ok: false, error: message });
+  });
+
+  return app;
 }
 
-try {
-  await bootstrap();
-} catch (err: any) {
-  console.error(`[API] bootstrap failed: ${String(err?.message || err)}`);
-  process.exit(1);
+export async function startServer() {
+  migrate();
+  startMintConfirmationPoller();
+
+  const app = createApp();
+  const env = getEnv();
+  const port = Number.isFinite(env.PORT) && env.PORT > 0 ? env.PORT : 3000;
+
+  await new Promise<void>((resolve, reject) => {
+    const server = app.listen(port, () => {
+      console.log(`[API] listening on port ${port}`);
+      resolve();
+    });
+    server.on("error", (err) => reject(err));
+  });
+}
+
+export function resetServerStateForTests() {
+  // no-op placeholder for compatibility with tests
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  startServer().catch((err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[API] failed to start: ${message}`);
+    process.exit(1);
+  });
 }

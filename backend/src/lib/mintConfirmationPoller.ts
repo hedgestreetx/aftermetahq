@@ -1,81 +1,131 @@
-import { db } from "./db";
+import type { Statement } from "better-sqlite3";
+
+import { getDb } from "./db";
 import { queryWocTxStatus } from "./woc";
 
 const POLL_INTERVAL_MS = 60_000;
 
-const selectPendingStmt = db.prepare(
-  `SELECT txid FROM mints WHERE confirmed = 0 AND txid IS NOT NULL`
-);
-const markConfirmedStmt = db.prepare(`UPDATE mints SET confirmed = 1 WHERE txid = ?`);
+type PollerState = {
+  selectPendingStmt: Statement | null;
+  markConfirmedStmt: Statement | null;
+  timer: NodeJS.Timeout | null;
+  running: boolean;
+};
 
-let timer: NodeJS.Timeout | null = null;
-let isRunning = false;
-const lastCheck = new Map<string, number>();
+type GlobalPollerState = {
+  __aftermetaMintPoller?: PollerState;
+};
 
-async function pollOnce(now: number) {
-  const pending = selectPendingStmt.all() as Array<{ txid: string }>;
-  const seen = new Set<string>();
+const globalPollerState = globalThis as typeof globalThis & GlobalPollerState;
 
-  for (const row of pending) {
-    const txid = String(row.txid || "").trim();
+function getState(): PollerState {
+  if (!globalPollerState.__aftermetaMintPoller) {
+    globalPollerState.__aftermetaMintPoller = {
+      selectPendingStmt: null,
+      markConfirmedStmt: null,
+      timer: null,
+      running: false,
+    };
+  }
+  return globalPollerState.__aftermetaMintPoller;
+}
+
+function getSelectPendingStmt(): Statement {
+  const state = getState();
+  if (
+    !state.selectPendingStmt ||
+    !(state.selectPendingStmt as Statement & { database?: { open?: boolean } }).database?.open
+  ) {
+    state.selectPendingStmt = getDb().prepare(
+      `SELECT txid FROM mints WHERE confirmed = 0 AND txid IS NOT NULL`
+    );
+  }
+  return state.selectPendingStmt;
+}
+
+function getMarkConfirmedStmt(): Statement {
+  const state = getState();
+  if (
+    !state.markConfirmedStmt ||
+    !(state.markConfirmedStmt as Statement & { database?: { open?: boolean } }).database?.open
+  ) {
+    state.markConfirmedStmt = getDb().prepare(`UPDATE mints SET confirmed = 1 WHERE txid = ?`);
+  }
+  return state.markConfirmedStmt;
+}
+
+async function pollOnce() {
+  const rows = getSelectPendingStmt().all() as Array<{ txid: string }>;
+  for (const row of rows) {
+    const txid = String(row.txid ?? "").trim();
     if (!txid) continue;
-    seen.add(txid);
-
-    const last = lastCheck.get(txid) ?? 0;
-    if (now - last < POLL_INTERVAL_MS) {
-      continue;
-    }
-
-    lastCheck.set(txid, now);
 
     try {
       const status = await queryWocTxStatus(txid);
-      if (!status.ok) {
+      if (!status.ok || !status.confirmed) {
         continue;
       }
-      if (!status.confirmed) {
-        continue;
-      }
-      const result = markConfirmedStmt.run(txid);
+      const result = getMarkConfirmedStmt().run(txid);
       if (result.changes > 0) {
         console.log(`[CONFIRM] ${txid}`);
       }
-    } catch (err: any) {
-      console.warn(`[CONFIRM] poll failed for ${txid}: ${String(err?.message || err)}`);
-    }
-  }
-
-  for (const key of Array.from(lastCheck.keys())) {
-    if (!seen.has(key)) {
-      lastCheck.delete(key);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[CONFIRM] poll failed for ${txid}: ${message}`);
     }
   }
 }
 
 async function runLoop() {
-  if (isRunning) {
+  const state = getState();
+  if (state.running) {
     return;
   }
-  isRunning = true;
+  state.running = true;
   try {
-    await pollOnce(Date.now());
+    await pollOnce();
   } finally {
-    isRunning = false;
+    state.running = false;
   }
 }
 
-export function pollPendingMints() {
-  if (timer) {
-    return timer;
+export function startMintConfirmationPoller(): NodeJS.Timeout {
+  const state = getState();
+  if (state.timer) {
+    return state.timer;
   }
+
   runLoop().catch((err) => {
-    console.error(`[CONFIRM] initial poll failed: ${String(err?.message || err)}`);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[CONFIRM] initial poll failed: ${message}`);
   });
-  timer = setInterval(() => {
+
+  state.timer = setInterval(() => {
     runLoop().catch((err) => {
-      console.error(`[CONFIRM] poll tick failed: ${String(err?.message || err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[CONFIRM] poll tick failed: ${message}`);
     });
   }, POLL_INTERVAL_MS);
-  timer.unref?.();
-  return timer;
+  state.timer.unref?.();
+  return state.timer;
+}
+
+export function stopMintConfirmationPoller() {
+  const state = getState();
+  if (state.timer) {
+    clearInterval(state.timer);
+    state.timer = null;
+  }
+  state.running = false;
+}
+
+export async function triggerMintConfirmationPollerOnce() {
+  await runLoop();
+}
+
+export function resetMintConfirmationPollerForTests() {
+  stopMintConfirmationPoller();
+  const state = getState();
+  state.selectPendingStmt = null;
+  state.markConfirmedStmt = null;
 }

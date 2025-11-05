@@ -6,8 +6,9 @@ type MockImplementation = (...args: any[]) => any;
 type MockFn = ((...args: any[]) => any) & {
   calls: any[][];
   mockImplementation(fn: MockImplementation): MockFn;
+  mockImplementationOnce(fn: MockImplementation): MockFn;
   mockResolvedValue(value: any): MockFn;
-  mockRejectedValue(error: any): MockFn;
+  mockResolvedValueOnce(value: any): MockFn;
   mockReturnValue(value: any): MockFn;
   mockReset(): void;
 };
@@ -16,15 +17,16 @@ type Suite = {
   name: string;
   beforeAll: Hook[];
   beforeEach: Hook[];
+  afterEach: Hook[];
   afterAll: Hook[];
-  tests: Array<{ name: string; fn: TestFn }>;
+  tests: Array<{ name: string; fn: TestFn; afterEachGroups: Hook[][] }>;
 };
 
 const suiteStack: Suite[] = [];
 const suites: Suite[] = [];
 
 function createSuite(name: string): Suite {
-  return { name, beforeAll: [], beforeEach: [], afterAll: [], tests: [] };
+  return { name, beforeAll: [], beforeEach: [], afterEach: [], afterAll: [], tests: [] };
 }
 
 export function describe(name: string, fn: () => void) {
@@ -54,60 +56,83 @@ export function beforeEach(fn: Hook) {
   currentSuite().beforeEach.push(fn);
 }
 
+export function afterEach(fn: Hook) {
+  currentSuite().afterEach.push(fn);
+}
+
 export function afterAll(fn: Hook) {
   currentSuite().afterAll.push(fn);
 }
 
 export function test(name: string, fn: TestFn) {
-  currentSuite().tests.push({ name, fn });
+  const suite = currentSuite();
+  const afterEachGroups = suiteStack.map((ctx) => ctx.afterEach);
+  suite.tests.push({ name, fn, afterEachGroups });
 }
 
 export const it = test;
 
 function createMock(): MockFn {
-  const mock: Partial<MockFn> = (
-    (...args: any[]) => {
-      mock.calls!.push(args);
-      if (mock.impl) {
-        return mock.impl(...args);
-      }
-      return mock.returnValue;
+  const implementations: MockImplementation[] = [];
+  const mock: Partial<MockFn> = ((...args: any[]) => {
+    mock.calls!.push(args);
+    const impl = implementations.shift() ?? mock.impl ?? mock.returnValueImpl;
+    if (impl) {
+      return impl(...args);
     }
-  ) as MockFn;
+    return undefined;
+  }) as MockFn;
 
   mock.calls = [];
   mock.mockImplementation = (fn: MockImplementation) => {
     mock.impl = fn;
     return mock;
   };
+  mock.mockImplementationOnce = (fn: MockImplementation) => {
+    implementations.push(fn);
+    return mock;
+  };
   mock.mockResolvedValue = (value: any) => {
     mock.impl = () => Promise.resolve(value);
     return mock;
   };
-  mock.mockRejectedValue = (error: any) => {
-    mock.impl = () => Promise.reject(error);
+  mock.mockResolvedValueOnce = (value: any) => {
+    implementations.push(() => Promise.resolve(value));
     return mock;
   };
   mock.mockReturnValue = (value: any) => {
-    mock.returnValue = value;
+    mock.returnValueImpl = () => value;
     return mock;
   };
   mock.mockReset = () => {
     mock.calls = [];
     delete mock.impl;
-    delete mock.returnValue;
+    delete mock.returnValueImpl;
+    implementations.length = 0;
   };
 
   return mock;
 }
 
+let moduleVersion = 0;
+
 export const vi = {
   fn: createMock,
+  resetModules() {
+    moduleVersion += 1;
+  },
+  get moduleVersion() {
+    return moduleVersion;
+  },
 };
 
 function format(value: any) {
   if (typeof value === "string") return JSON.stringify(value);
   return String(value);
+}
+
+function isObject(value: any): value is Record<string, any> {
+  return value !== null && typeof value === "object";
 }
 
 export function expect(actual: any) {
@@ -117,25 +142,36 @@ export function expect(actual: any) {
         throw new Error(`Expected ${format(actual)} to be ${format(expected)}`);
       }
     },
-    toBeGreaterThan(expected: number) {
-      if (!(actual > expected)) {
-        throw new Error(`Expected ${actual} to be greater than ${expected}`);
+    toEqual(expected: any) {
+      const actualJson = JSON.stringify(actual);
+      const expectedJson = JSON.stringify(expected);
+      if (actualJson !== expectedJson) {
+        throw new Error(`Expected ${actualJson} to equal ${expectedJson}`);
       }
     },
-    toBeGreaterThanOrEqual(expected: number) {
-      if (!(actual >= expected)) {
-        throw new Error(`Expected ${actual} to be >= ${expected}`);
+    toContain(expected: any) {
+      if (typeof actual === "string") {
+        if (!actual.includes(expected)) {
+          throw new Error(`Expected string ${format(actual)} to contain ${format(expected)}`);
+        }
+        return;
       }
-    },
-    toHaveBeenCalledTimes(expected: number) {
-      const calls = Array.isArray(actual?.calls) ? actual.calls.length : 0;
-      if (calls !== expected) {
-        throw new Error(`Expected mock to be called ${expected} times but was ${calls}`);
+      if (Array.isArray(actual)) {
+        if (!actual.includes(expected)) {
+          throw new Error(`Expected array to contain ${format(expected)}`);
+        }
+        return;
       }
+      throw new Error("toContain requires string or array");
     },
     toBeTruthy() {
       if (!actual) {
         throw new Error(`Expected value to be truthy but was ${format(actual)}`);
+      }
+    },
+    toBeFalsy() {
+      if (actual) {
+        throw new Error(`Expected value to be falsy but was ${format(actual)}`);
       }
     },
   };
@@ -147,6 +183,14 @@ async function runHook(hook: Hook) {
 
 async function runTest(fn: TestFn) {
   await Promise.resolve(fn());
+}
+
+async function runAfterEachGroups(groups: Hook[][]) {
+  for (const group of [...groups].reverse()) {
+    for (const hook of [...group].reverse()) {
+      await runHook(hook);
+    }
+  }
 }
 
 export async function runSuites() {
@@ -166,6 +210,7 @@ export async function runSuites() {
 
         try {
           await runTest(testCase.fn);
+          await runAfterEachGroups(testCase.afterEachGroups);
           console.log(`  ✓ ${testCase.name}`);
         } catch (err) {
           failures += 1;
