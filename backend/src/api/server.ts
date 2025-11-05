@@ -6,7 +6,8 @@ import crypto from "crypto";
 import { ENV } from "../lib/env";
 import apiRoutes from "./routes";
 import mintRouter from "./mintTestnet";
-import { startWocSocket } from "../lib/woc";
+import { pollPendingMints } from "../lib/mintConfirmationPoller";
+import { wocApiNetworkSegment } from "../lib/wocUrls";
 // CHANGE THIS PATH to where your migrate function is exported from
 // for example "../lib/db" or "../db/migrate"
 import { migrate } from "../lib/db";
@@ -14,7 +15,7 @@ import { migrate } from "../lib/db";
 // ensure database is opened and migrations are applied exactly once on boot
 migrate();
 
-const NET_WOC = ENV.NETWORK === "mainnet" || ENV.NETWORK === "livenet" ? "main" : "test";
+const NET_WOC = wocApiNetworkSegment();
 console.log(`[NET] network=${ENV.NETWORK} NET_WOC=${NET_WOC}`);
 
 // app and middleware

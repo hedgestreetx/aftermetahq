@@ -4,11 +4,9 @@ import fetch from "node-fetch";
 import { ENV } from "./env";
 import { db } from "./db";
 
-const NET_WOC =
-  ENV.NETWORK === 'mainnet' || ENV.NETWORK === 'livenet' ? 'main' : 'test';
+const NET_WOC = wocApiNetworkSegment();
 export const WOC_BASE =
   ENV.WOC_BASE || `https://api.whatsonchain.com/v1/bsv/${NET_WOC}`;
-const WOC_URL = `wss://socket.whatsonchain.com/mempool`; // same endpoint for all nets
 
 type WocOverrides = {
   fetchAddressUtxos?: (address: string) => Promise<any> | any;
