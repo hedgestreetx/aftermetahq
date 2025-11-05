@@ -8,7 +8,7 @@ import { db } from "../../lib/db";
 import { logger } from "../../lib/logger";
 import { DEFAULT_FEE_RATE, DUST_SATS, TESTNET_HEADROOM } from "../../lib/coin";
 import { buildOutputs, selectUtxos, type Utxo } from "../../lib/utxo";
-import * as woc from "../../lib/woc";
+import { broadcastRawTransaction, fetchAddressUtxos } from "../../lib/woc";
 
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -322,7 +322,7 @@ router.post("/v1/buy", async (req, res) => {
 
     let utxos;
     try {
-      utxos = await woc.fetchAddressUtxos(normalizedFrom);
+      utxos = await fetchAddressUtxos(normalizedFrom);
     } catch (err: any) {
       lastError = String(err?.message || err);
       logger.warn("buy.utxos_failed", { requestId, attempt, error: lastError });
@@ -389,7 +389,7 @@ router.post("/v1/buy", async (req, res) => {
 
     const raw = tx.serialize(true);
     try {
-      const broadcast = await woc.broadcastRawTransaction(raw);
+      const broadcast = await broadcastRawTransaction(raw);
       const txid = broadcast.txid;
       const finalChange = outputs.totals.changeSats;
       const feeSats = selection.totalInputSats - finalChange - payload.amountSats;
