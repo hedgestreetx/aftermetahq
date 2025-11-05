@@ -871,8 +871,6 @@ r.post("/verify", async (_req, res) => {
   }
 });
 
-export const buyQuoteRoute = buyQuoteHandler;
-export const buyOrderRoute = [buyOrderIdempotency, buyOrderHandler] as const;
 export const mintQuoteRoute = quoteMintHandler;
 export const mintRoute = [mintIdempotency, mintHandler] as const;
 
