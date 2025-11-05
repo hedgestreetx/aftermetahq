@@ -103,7 +103,7 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 async function bootstrap() {
-  pollPendingMints();
+  startWocSocket();
 
   const port = Number.isFinite(ENV.PORT) && ENV.PORT > 0 ? ENV.PORT : 3000;
 
