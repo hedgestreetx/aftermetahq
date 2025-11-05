@@ -27,7 +27,7 @@ const FEE_PER_KB = ENV.FEE_PER_KB || 150;
 
 const BASE58_RX = /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/;
 const NET_WOC = ENV.NETWORK === "mainnet" ? "main" : "test"; // WOC URL segment
-const WOC_ROOT = ENV.WOC_BASE || `https://api.whatsonchain.com/v1/bsv/${NET_WOC}`;
+const WOC_ROOT = WOC_BASE;
 const WOC_STATUS_URL = (txid: string) => `${WOC_ROOT}/tx/${txid}/status`;
 
 const nowMs = () => Date.now();
