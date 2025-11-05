@@ -71,8 +71,6 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 function healthPayload() {
   return { service: "aftermeta-backend", network: ENV.NETWORK, port: ENV.PORT };
 }
-app.get("/health", (_req, res) => res.json(healthPayload()));
-app.get("/api/health", (_req, res) => res.json(healthPayload()));
 
 // ----------------------------- Routers -----------------------------
 // Mount at root and /api so /v1/* and /api/v1/* both work.
@@ -93,9 +91,4 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   res.status(code).json({ ok: false, error: msg });
 });
 
-// ----------------------------- Boot -----------------------------
-const PORT = Number(ENV.PORT || 3000);
-app.listen(PORT, () => {
-  console.log(`✅ Backend running on http://localhost:${PORT}`);
-  startWocSocket();
-});
+await bootstrap();
