@@ -74,8 +74,6 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 function healthPayload() {
   return { service: "aftermeta-backend", network: ENV.NETWORK, port: ENV.PORT };
 }
-app.get("/health", (_req, res) => res.json(healthPayload()));
-app.get("/api/health", (_req, res) => res.json(healthPayload()));
 
 // routers
 app.use(apiRoutes);
@@ -95,7 +93,7 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   res.status(code).json({ ok: false, error: msg });
 });
 
-// boot
+// ----------------------------- Boot -----------------------------
 const PORT = Number(ENV.PORT || 3000);
 app.listen(PORT, () => {
   console.log(`✅ Backend running on http://localhost:${PORT}`);
