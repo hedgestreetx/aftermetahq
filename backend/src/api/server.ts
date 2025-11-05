@@ -1,5 +1,5 @@
 // backend/src/api/server.ts
-import express, { Request, Response, NextFunction } from "express";
+import type { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import crypto from "crypto";
 
@@ -9,13 +9,12 @@ import mintRouter from "./mintTestnet";
 import { startWocSocket } from "../lib/woc";
 
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
-import { db, migrate } from "../lib/db";
 migrate();
 const NET_WOC = ENV.NETWORK === "mainnet" || ENV.NETWORK === "livenet" ? "main" : "test";
 console.log(`[NET] network=${ENV.NETWORK} NET_WOC=${NET_WOC}`);
 
 // ----------------------------- App & Middleware -----------------------------
-const app = express();
+const app = createExpressApp();
 
 app.set("trust proxy", 1);
 
@@ -57,7 +56,7 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: "1mb" }));
+app.use(expressJson({ limit: "1mb" }));
 
 // Basic request-id so your logs are traceable
 app.use((req: Request, _res: Response, next: NextFunction) => {
