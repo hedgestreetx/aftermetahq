@@ -2,11 +2,12 @@ import { Router } from 'express'
 import { bsv } from 'scrypt-ts'
 import { db } from '../lib/db'
 import { ENV } from '../lib/env' // expects ENV.NETWORK = 'testnet' | 'mainnet'
+import { wocApiNetworkSegment } from '../lib/wocUrls'
 
 // -----------------------------------------------------------------------------
 // Chain config (avoid hardcoding testnet everywhere)
 // -----------------------------------------------------------------------------
-const WOC_NET = ENV.NETWORK === 'mainnet' ? 'main' : 'test'
+const WOC_NET = wocApiNetworkSegment()
 const WOC_BASE = `https://api.whatsonchain.com/v1/bsv/${WOC_NET}`
 
 // -----------------------------------------------------------------------------
