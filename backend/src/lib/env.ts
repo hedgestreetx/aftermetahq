@@ -1,7 +1,22 @@
+import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 
-dotenv.config({ path: path.resolve(process.cwd(), "backend/.env") });
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
+const CANDIDATE_ENV_PATHS = [
+  path.resolve(process.cwd(), "backend/.env"),
+  path.resolve(process.cwd(), ".env"),
+  path.resolve(moduleDir, "../../.env"),
+];
+
+for (const candidate of CANDIDATE_ENV_PATHS) {
+  if (fs.existsSync(candidate)) {
+    dotenv.config({ path: candidate });
+    break;
+  }
+}
 
 type Net = "testnet" | "mainnet";
 const normalizeNet = (v?: string): Net =>
