@@ -7,30 +7,6 @@ import { ENV } from "../lib/env";
 import apiRoutes from "./routes";
 import mintRouter from "./mintTestnet";
 import { startWocSocket } from "../lib/woc";
-import { db, migrate } from "../lib/db";
-
-async function loadExpress() {
-  try {
-    return await import("express");
-  } catch (error: any) {
-    if (error?.code === "ERR_MODULE_NOT_FOUND") {
-      console.error(
-        "❌ The 'express' dependency is missing. Run `npm install` in the backend directory before starting the server."
-      );
-    }
-
-    throw error;
-  }
-}
-
-const expressModule: typeof import("express") = await loadExpress();
-const createExpressApp = expressModule.default;
-const expressJson: typeof import("express").json = (() => {
-  const jsonFn = expressModule.json ?? createExpressApp.json;
-  if (typeof jsonFn === "function") return jsonFn.bind(createExpressApp);
-
-  throw new Error("Express JSON body parser could not be loaded");
-})();
 
 // ✅ Ensure database is opened and migrations are applied exactly once on boot
 migrate();
