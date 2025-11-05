@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { queryWocTxStatus } from "./woc";
+import * as woc from "./woc";
 
 const markMintConfirmedStmt = db.prepare(
   `UPDATE mints SET confirmed = 1 WHERE txid = ? COLLATE NOCASE`,
@@ -46,7 +46,7 @@ export async function loadMintStatus(txid: string): Promise<MintStatus> {
     };
   }
 
-  const result = await queryWocTxStatus(normalized);
+  const result = await woc.queryWocTxStatus(normalized);
   return {
     txid: normalized,
     ok: result.ok,

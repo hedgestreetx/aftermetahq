@@ -195,6 +195,20 @@ function ensureSchemaIndexes() {
   `);
 }
 
+const skipAutoMigrate = String(process.env.AFTERMETA_SKIP_AUTO_MIGRATE || "")
+  .trim()
+  .toLowerCase() === "true";
+
+if (!skipAutoMigrate) {
+  try {
+    migrate();
+  } catch (err: any) {
+    const message = String(err?.message || err);
+    console.error(`[DB] auto-migrate failed: ${message}`);
+    throw err;
+  }
+}
+
 function ensureBuySchema() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS buys (
