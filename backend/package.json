@@ -3,10 +3,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "tsx --tsconfig tsconfig.json src/api/server.ts",
-    "indexer": "tsx --tsconfig tsconfig.json src/indexer/indexer.ts",
-    "test": "tsx --tsconfig tsconfig.json scripts/run-tests.ts",
-    "test:mint": "tsx --tsconfig tsconfig.json test/mint.integration.test.ts"
+    "dev": "tsx src/api/server.ts",
+    "indexer": "tsx src/indexer/indexer.ts",
+    "test:mint": "tsx test/mint.integration.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^9.6.0",
