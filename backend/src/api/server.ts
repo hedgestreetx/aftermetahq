@@ -75,6 +75,14 @@ function healthPayload() {
   return { service: "aftermeta-backend", network: ENV.NETWORK, port: ENV.PORT };
 }
 
+app.get("/health", (_req, res) => {
+  res.status(200).json({ ok: true, ...healthPayload() });
+});
+
+app.get("/api/health", (_req, res) => {
+  res.status(200).json({ ok: true, ...healthPayload() });
+});
+
 // routers
 app.use(apiRoutes);
 app.use("/api", apiRoutes);
@@ -93,4 +101,38 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   res.status(code).json({ ok: false, error: msg });
 });
 
-await bootstrap();
+async function bootstrap() {
+  startWocSocket();
+
+  const port = Number.isFinite(ENV.PORT) && ENV.PORT > 0 ? ENV.PORT : 3000;
+
+  const server = await new Promise<ReturnType<typeof app.listen>>((resolve, reject) => {
+    const listener = app.listen(port, () => {
+      console.log(`[API] listening on http://localhost:${port}`);
+      resolve(listener);
+    });
+    listener.on("error", (err) => reject(err));
+  });
+
+  const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
+  for (const signal of signals) {
+    process.once(signal, () => {
+      console.log(`[API] received ${signal}, shutting down`);
+      server.close((err) => {
+        if (err) {
+          console.error(`[API] error closing HTTP server`, err);
+          process.exit(1);
+        } else {
+          process.exit(0);
+        }
+      });
+    });
+  }
+}
+
+try {
+  await bootstrap();
+} catch (err: any) {
+  console.error(`[API] bootstrap failed: ${String(err?.message || err)}`);
+  process.exit(1);
+}
