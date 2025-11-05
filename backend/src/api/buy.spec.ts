@@ -4,9 +4,9 @@ import { tmpdir } from "os";
 
 import express from "express";
 import { bsv } from "scrypt-ts";
-import { beforeAll, beforeEach, afterAll, describe, expect, test, vi } from "vitest";
+import { beforeAll, beforeEach, afterAll, describe, expect, test, vi } from "../testUtils/vitest-shim";
 
-import request from "supertest";
+import { requestJson } from "../testUtils/http";
 
 const priv = bsv.PrivateKey.fromRandom("testnet");
 const fromAddress = priv.toAddress("testnet").toString();
@@ -80,12 +80,16 @@ describe("POST /v1/buy", () => {
   });
 
   test("returns 400 for invalid payload", async () => {
-    const res = await request(app)
-      .post("/v1/buy")
-      .set("Idempotency-Key", "bad-1")
-      .send({})
-      .expect(400);
+    const res = await requestJson(app, {
+      method: "POST",
+      path: "/v1/buy",
+      headers: {
+        "Idempotency-Key": "bad-1",
+      },
+      body: {},
+    });
 
+    expect(res.status).toBe(400);
     expect(res.body.ok).toBe(false);
   });
 
@@ -103,17 +107,21 @@ describe("POST /v1/buy", () => {
     fetchAddressUtxos.mockResolvedValue(utxos);
     broadcastRawTransaction.mockResolvedValue({ txid: "ab".repeat(32) });
 
-    const res = await request(app)
-      .post("/v1/buy")
-      .set("Idempotency-Key", "buy-1")
-      .send({
+    const res = await requestJson(app, {
+      method: "POST",
+      path: "/v1/buy",
+      headers: {
+        "Idempotency-Key": "buy-1",
+      },
+      body: {
         fromAddress,
         toAddress: toAddressPrimary,
         amountSats: 1000,
         slippagePct: 0,
-      })
-      .expect(200);
+      },
+    });
 
+    expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.txid).toBe("ab".repeat(32));
     expect(broadcastRawTransaction).toHaveBeenCalledTimes(1);
@@ -133,28 +141,35 @@ describe("POST /v1/buy", () => {
     fetchAddressUtxos.mockResolvedValue(utxos);
     broadcastRawTransaction.mockResolvedValue({ txid: "cd".repeat(32) });
 
-    await request(app)
-      .post("/v1/buy")
-      .set("Idempotency-Key", "buy-dup")
-      .send({
+    await requestJson(app, {
+      method: "POST",
+      path: "/v1/buy",
+      headers: {
+        "Idempotency-Key": "buy-dup",
+      },
+      body: {
         fromAddress,
         toAddress: toAddressAlt,
         amountSats: 1000,
         slippagePct: 0,
-      })
-      .expect(200);
+      },
+    });
 
-    const res = await request(app)
-      .post("/v1/buy")
-      .set("Idempotency-Key", "buy-dup")
-      .send({
+    const res = await requestJson(app, {
+      method: "POST",
+      path: "/v1/buy",
+      headers: {
+        "Idempotency-Key": "buy-dup",
+      },
+      body: {
         fromAddress,
         toAddress: toAddressConflict,
         amountSats: 1000,
         slippagePct: 0,
-      })
-      .expect(409);
+      },
+    });
 
+    expect(res.status).toBe(409);
     expect(res.body.ok).toBe(false);
     expect(broadcastRawTransaction).toHaveBeenCalledTimes(1);
   });

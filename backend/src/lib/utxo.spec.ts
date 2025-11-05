@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "../testUtils/vitest-shim";
 
 import { buildOutputs, estimateFee, selectUtxos, type Utxo } from "./utxo";
 import { DUST_SATS } from "./coin";
